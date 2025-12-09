@@ -1,0 +1,31 @@
+# Основные зависимости для мультиагентной крипто-аналитической системы
+
+# Асинхронность
+asyncio-compat>=0.1.2
+
+# WebSocket клиент
+websockets>=12.0
+
+# HTTP клиент
+aiohttp>=3.9.0
+
+# Работа с данными
+pandas>=2.1.0
+numpy>=1.24.0
+
+# Telegram бот
+python-telegram-bot>=20.7
+
+# База данных (встроенная в Python, но можно использовать для миграций)
+# sqlite3 встроен в Python
+
+# Утилиты
+python-dotenv>=1.0.0
+
+# Веб-дашборд
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Уведомления
+aiohttp>=3.9.0  # Для Discord webhook
+

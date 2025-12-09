@@ -1,0 +1,27 @@
+"""
+config.py.example - пример файла конфигурации
+Скопируйте этот файл в config.py и заполните своими данными
+"""
+import os
+
+# Telegram настройки
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
+
+# Binance настройки (не требуются для публичных данных)
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+
+# Ончейн API ключи (опционально, для расширенного функционала)
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
+BLOCKPI_API_KEY = os.getenv("BLOCKPI_API_KEY", "")
+
+# Настройки агентов
+MARKET_AGENT_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "DOTUSDT", "MATICUSDT", "AVAXUSDT"
+]
+
+WHALE_THRESHOLD_USD = 100000  # Порог для whale транзакций
+VOLUME_SPIKE_THRESHOLD = 3.0  # Порог всплеска объема (x среднего)
+
