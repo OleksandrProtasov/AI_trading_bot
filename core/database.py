@@ -15,11 +15,11 @@ class Database:
         self._init_db()
     
     def _init_db(self):
-        """Инициализация таблиц базы данных"""
+        """Create tables and indexes if missing."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Таблица свечей
+        # candles
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS candles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,7 +35,7 @@ class Database:
             )
         """)
         
-        # Таблица сигналов
+        # signals
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +50,7 @@ class Database:
             )
         """)
         
-        # Таблица whale транзакций
+        # whale_transactions
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS whale_transactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,7 +66,7 @@ class Database:
             )
         """)
         
-        # Таблица аномалий
+        # anomalies
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS anomalies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +79,7 @@ class Database:
             )
         """)
         
-        # Таблица ликвидности
+        # liquidity_zones
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS liquidity_zones (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,7 +92,7 @@ class Database:
             )
         """)
         
-        # Индексы для быстрого поиска
+        # indexes
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_candles_symbol_time ON candles(symbol, timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_whale_timestamp ON whale_transactions(timestamp)")
@@ -103,7 +103,7 @@ class Database:
     
     async def save_candle(self, symbol: str, timeframe: str, timestamp: int, 
                          open: float, high: float, low: float, close: float, volume: float):
-        """Сохранение свечи"""
+        """Insert or replace one candle row."""
         async with self.lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -115,13 +115,13 @@ class Database:
                 """, (symbol, timeframe, timestamp, open, high, low, close, volume))
                 conn.commit()
             except Exception as e:
-                self.logger.error(f"Ошибка сохранения свечи: {e}", exc_info=True)
+                self.logger.error("save_candle failed: %s", e, exc_info=True)
             finally:
                 conn.close()
     
     async def save_signal(self, agent_type: str, signal_type: str, priority: str,
                          message: str, symbol: Optional[str] = None, data: Optional[Dict] = None):
-        """Сохранение сигнала"""
+        """Insert signal; returns row id."""
         async with self.lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -136,7 +136,7 @@ class Database:
                 conn.commit()
                 return cursor.lastrowid
             except Exception as e:
-                self.logger.error(f"Ошибка сохранения сигнала: {e}", exc_info=True)
+                self.logger.error("save_signal failed: %s", e, exc_info=True)
                 return None
             finally:
                 conn.close()
@@ -144,7 +144,7 @@ class Database:
     async def save_whale_transaction(self, chain: str, token: str, from_address: str,
                                     to_address: str, amount: float, value_usd: float,
                                     transaction_type: str, data: Optional[Dict] = None):
-        """Сохранение whale транзакции"""
+        """Insert whale transaction row."""
         async with self.lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -158,13 +158,13 @@ class Database:
                 """, (timestamp, chain, token, from_address, to_address, amount, value_usd, transaction_type, data_json))
                 conn.commit()
             except Exception as e:
-                self.logger.error(f"Ошибка сохранения whale транзакции: {e}", exc_info=True)
+                self.logger.error("save_whale_transaction failed: %s", e, exc_info=True)
             finally:
                 conn.close()
     
     async def save_anomaly(self, symbol: str, anomaly_type: str, description: str,
                           severity: str, data: Optional[Dict] = None):
-        """Сохранение аномалии"""
+        """Insert anomaly row."""
         async with self.lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -178,14 +178,14 @@ class Database:
                 """, (timestamp, symbol, anomaly_type, description, severity, data_json))
                 conn.commit()
             except Exception as e:
-                self.logger.error(f"Ошибка сохранения аномалии: {e}", exc_info=True)
+                self.logger.error("save_anomaly failed: %s", e, exc_info=True)
             finally:
                 conn.close()
     
     async def save_liquidity_zone(self, symbol: str, price_level: float, 
                                  liquidity_amount: float, zone_type: str,
                                  data: Optional[Dict] = None):
-        """Сохранение зоны ликвидности"""
+        """Insert liquidity zone snapshot."""
         async with self.lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -199,12 +199,12 @@ class Database:
                 """, (timestamp, symbol, price_level, liquidity_amount, zone_type, data_json))
                 conn.commit()
             except Exception as e:
-                self.logger.error(f"Ошибка сохранения зоны ликвидности: {e}", exc_info=True)
+                self.logger.error("save_liquidity_zone failed: %s", e, exc_info=True)
             finally:
                 conn.close()
     
     async def get_recent_candles(self, symbol: str, timeframe: str, limit: int = 100) -> List[Dict]:
-        """Получение последних свечей"""
+        """Return recent candles for symbol/timeframe."""
         async with self.lock:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
@@ -218,13 +218,13 @@ class Database:
                 rows = cursor.fetchall()
                 return [dict(row) for row in rows]
             except Exception as e:
-                self.logger.error(f"Ошибка получения свечей: {e}", exc_info=True)
+                self.logger.error("get_candles failed: %s", e, exc_info=True)
                 return []
             finally:
                 conn.close()
     
     async def mark_signal_sent(self, signal_id: int):
-        """Отметить сигнал как отправленный в Telegram"""
+        """Mark signal.sent_to_telegram = 1."""
         async with self.lock:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -232,7 +232,7 @@ class Database:
                 cursor.execute("UPDATE signals SET sent_to_telegram = 1 WHERE id = ?", (signal_id,))
                 conn.commit()
             except Exception as e:
-                self.logger.error(f"Ошибка обновления сигнала: {e}", exc_info=True)
+                self.logger.error("mark_signal_sent failed: %s", e, exc_info=True)
             finally:
                 conn.close()
 
