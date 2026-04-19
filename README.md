@@ -1,276 +1,95 @@
-# Multi-Agent Crypto Analytics
+# Крипто-аналитика: мультиагентный бот
 
-A **Python-based monitoring and alerting platform** for cryptocurrency markets. It continuously ingests public market data (primarily from **Binance**), runs several **specialized analysis agents** in parallel, stores findings in **SQLite**, optionally pushes **rich Telegram messages**, and exposes a **REST API** plus a **browser dashboard** for review and export.
+## О проекте
 
-**Important:** this is **not** a turnkey “press button to trade” bot. It does **not** place or manage orders on your behalf. It produces **signals, context, and summaries** so you or your trading stack can decide what to do next.
+Это **система мониторинга крипторынка** в реальном времени: она собирает данные с биржи и внешних API, анализирует их несколькими «агентами», сохраняет **сигналы** в базу и может **присылать уведомления** (например, в Telegram). Есть **веб-дашборд** и **REST API** для просмотра и выгрузки.
 
----
-
-## What you get (client-facing overview)
-
-| Area | What it does |
-|------|----------------|
-| **Live market data** | WebSocket streams for **candles (klines)**, **order book depth**, and **trades** for a configurable list of symbols (e.g. `BTCUSDT`, `ETHUSDT`). |
-| **Multi-agent analysis** | Six logical “workers” each look at different aspects of the market (trend/volatility, DEX-style activity, book liquidity, high-risk pairs, fast moves, and a final blend). |
-| **Signal bus** | All agents publish into a central **event router** that persists every signal and forwards it to the **aggregator** (and optionally legacy direct Telegram paths). |
-| **Decision-style output** | The **aggregator** scores recent signals per symbol and may emit consolidated hints such as **BUY / SELL / EXIT / WAIT** with confidence, risk tier, and short reasons (display only — not personalized investment advice). |
-| **Persistence** | **SQLite** database for signals, candles, optional whale/liquidity/anomaly tables — suitable for a single node or small deployment. |
-| **Operator UI** | **Web dashboard** with filters, charts, recent signal table, JSON export hooks. |
-| **Integration** | **OpenAPI**-documented **REST API** for dashboards, cron jobs, or downstream automation you build yourself. |
-| **Alerts** | **Telegram** is the main delivery channel; **Discord** and **Email** helper modules exist for custom wiring. |
+Это **не торговый робот**: заявки на бирже он **не выставляет** и портфель **не ведёт**. Он помогает **видеть события и сужать внимание** на важных движениях рынка.
 
 ---
 
-## Architecture at a glance
+## Что умеет бот
 
-```mermaid
-flowchart LR
-  subgraph ingest [Data ingest]
-    BN[Binance WebSocket]
-    DS[DexScreener HTTP]
-  end
-  subgraph agents [Agents]
-    M[Market]
-    O[OnChain]
-    L[Liquidity]
-    S[Shitcoin]
-    E[Emergency]
-    A[Aggregator]
-  end
-  subgraph core [Core]
-    ER[EventRouter]
-    DB[(SQLite)]
-    HC[HealthCheck]
-  end
-  subgraph out [Outputs]
-    TG[Telegram]
-    API[REST API]
-    UI[Dashboard]
-  end
-  BN --> M
-  BN --> E
-  BN --> L
-  DS --> O
-  DS --> S
-  M --> ER
-  O --> ER
-  L --> ER
-  S --> ER
-  E --> ER
-  ER --> DB
-  ER --> A
-  A --> TG
-  DB --> API
-  DB --> UI
-  M --> HC
-  O --> HC
-  L --> HC
-  S --> HC
-  E --> HC
-  A --> HC
-```
+- Слушает **Binance** (свечи, стакан, сделки) по выбранным парам.
+- Смотрит **ликвидность и дисбаланс** в стакане, резкие **всплески объёма и цены**.
+- Подтягивает данные с **DexScreener** для **DEX / «мем»-пар** и крупных движений (ограниченно возможностями бесплатного API).
+- **Сводит сигналы** в одно решение-ориентир: BUY / SELL / EXIT / WAIT (как **подсказка**, не инвестиционная рекомендация).
+- Пишет всё в **SQLite**, показывает в **дашборде**, отдаёт через **API**, шлёт в **Telegram** (при настройке).
 
 ---
 
-## Agents in detail
+## Какие задачи решает
 
-Each agent runs asynchronously alongside the others. They **emit structured signals** (agent name, signal type, priority, message, symbol, optional JSON payload).
-
-### 1. Market Agent (`agents/market_agent.py`)
-
-- Connects to **Binance** combined WebSocket streams.
-- Maintains rolling **candles**, **order books**, and **recent trades** per symbol.
-- Periodically runs **lightweight technical heuristics** (trend, volatility, volume vs average, rough support/resistance).
-- Example signal families: **volume spikes**, **high volatility**, **support/resistance breaks**.
-
-### 2. OnChain Agent (`agents/onchain_agent.py`)
-
-- Uses **public DEX metadata** (via **DexScreener**-style HTTP APIs) rather than a full archival blockchain node.
-- Surfaces **large relative volume / “whale-sized” activity** style alerts on liquid pairs it can see through that API.
-- Best thought of as **liquidity and flow radar**, not a certified on-chain forensics tool.
-
-### 3. Liquidity Agent (`agents/liquidity_agent.py`)
-
-- Reads **local order book snapshots** produced by the Market Agent.
-- Detects **bid/ask imbalance**, clusters of resting liquidity, and **stop-cluster-style** pockets (heuristic, not exchange-confirmed stop orders).
-
-### 4. Shitcoin / DEX scanner (`agents/shitcoin_agent.py`)
-
-- Polls DEX pair lists for **extreme moves**, thin liquidity, and rapid **pump/dump** style patterns.
-- Flags **high-risk** meme or low-cap dynamics; useful for **awareness**, not as a standalone buy signal.
-
-### 5. Emergency Agent (`agents/emergency_agent.py`)
-
-- Short-interval pass over Market Agent buffers.
-- Fires on **sudden volume spikes**, **sharp price moves**, **very thin books**, and **cascade sell patterns** (consecutive down candles with rising volume).
-- Priorities are tuned so **urgent / critical** items surface quickly.
-
-### 6. Aggregator Agent (`agents/aggregator_agent.py`)
-
-- Consumes the **recent signal window** per symbol from all agents.
-- Applies **weights** by agent, signal type, and priority, then deduplicates and thresholds against `min_confidence` from config.
-- Formats **HTML Telegram messages** with confidence, risk, reasons, and optional price context.
-- Sends **hourly summary** messages when there is activity to report.
+| Задача | Как помогает |
+|--------|----------------|
+| Не упустить резкие движения | Срочные сигналы при скачках цены/объёма и тонком стакане. |
+| Понять «шум» по многим парам | Несколько агентов смотрят разные стороны рынка, итог — в агрегаторе. |
+| История и отчётность | Сигналы и свечи хранятся в БД, есть выгрузка и API. |
+| Уведомления команде | Telegram (и при доработке — Discord / Email). |
 
 ---
 
-## Core services (shared infrastructure)
+## Технологии
 
-| Module | Role |
-|--------|------|
-| `core/event_router.py` | Async queue: **save signal → call aggregator → optional Telegram**. |
-| `core/database.py` | Async-friendly SQLite access: candles, signals, whale rows, anomalies, liquidity zones. |
-| `core/metrics.py` | Counters / aggregates for dashboards and API. |
-| `core/health_check.py` | Registers running agents for **liveness-style** monitoring. |
-| `core/websocket_manager.py` | Binance stream helpers / reconnection logic used by the Market Agent. |
-| `core/analytics.py` | Helpers consumed by the enhanced dashboard (historical slices, stats). |
-| `core/utils.py` | Shared validation, stable-coin checks, retry decorator. |
-| `core/logger.py` | Rotating file + console logging. |
+- **Python 3.10+**
+- **asyncio** — параллельная работа агентов
+- **websockets**, **aiohttp** — потоки и HTTP
+- **SQLite** — хранение
+- **python-telegram-bot** — Telegram
+- **FastAPI**, **uvicorn** — REST API и веб-интерфейс
+- **pandas / numpy** — обработка рядов (где используется в коде)
 
 ---
 
-## Web dashboard (`web/dashboard_enhanced.py`)
+## Про «обучение» и модель
 
-- Single-page **dark UI** with **Chart.js** graphs.
-- **Filters:** time window, agent, signal type, free-text search on symbol/message.
-- **Stats cards:** totals, window counts, agent activity, average confidence (where available).
-- **Tables:** latest signals with timestamp, symbol, action/type, price, confidence, risk, source agent.
-- **Export:** opens JSON export endpoint for the selected window (browser download).
-- **WebSocket:** pushes refreshed dashboard payload on an interval while the page is open.
+В этом репозитории **нет обучаемой нейросети** и **нет дообучаемой модели** в смысле machine learning: поведение задаётся **правилами, порогами и весами** в конфиге и коде агентов.
 
-Default URL: **http://localhost:8000**
+Если понадобится «обучаемая модель», её нужно **подключать отдельно** (свой сервис, свои данные), а этот бот может оставаться источником сигналов и данных через API или БД.
 
 ---
 
-## REST API (`web/api.py`)
-
-FastAPI application with auto-generated docs.
-
-- **Signals:** list, filter, paginate, fetch by id.
-- **Metrics:** system counters and compact summaries.
-- **Agents:** static catalog describing each agent’s role (for UI labels).
-- **Candles:** query recent OHLCV for a symbol/timeframe stored locally.
-- **Export:** CSV / JSON dumps of signal history.
-- **Search:** simple text / field search over stored signals.
-- **Statistics:** per-symbol counts and placeholder performance hooks.
-
-Default base URL: **http://localhost:8001** — interactive docs: **http://localhost:8001/docs**
-
----
-
-## Notifications (`bot/`)
-
-- **`TelegramBot`** — HTML-formatted **signal** and **report** messages; primary user-facing channel.
-- **`discord_notifier.py` / `email_notifier.py`** — optional; wire them in your own code or extensions if you need multi-channel delivery.
-
----
-
-## Configuration
-
-1. Copy the template and adjust, **or** rely purely on environment variables (see `config.py.example`).
+## Быстрый старт
 
 ```bash
+pip install -r requirements.txt
 copy config.py.example config.py
 ```
 
-On Linux/macOS:
+Задайте **`TELEGRAM_BOT_TOKEN`** и **`TELEGRAM_CHAT_ID`** (переменные окружения или `config.py`). Файл `config.py` в git не кладём.
 
-```bash
-cp config.py.example config.py
-```
-
-2. **Minimum for Telegram:**
-
-| Variable | Description |
-|----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | From [@BotFather](https://t.me/BotFather) |
-| `TELEGRAM_CHAT_ID` | Your user, group, or channel id |
-
-3. **Optional:** `LOG_LEVEL` (default `INFO`), symbol list and thresholds live in the `Config` dataclasses in `config.py` / example file (e.g. volume spike multiplier, min confidence, aggregation interval).
-
-`config.py` is **gitignored** — never commit real tokens.
-
----
-
-## How to run
-
-**Core pipeline (agents + router + health checks):**
+Запуск основной логики:
 
 ```bash
 python main.py
 ```
 
-**REST API** (port `8001` by default):
+API (по умолчанию порт **8001**):
 
 ```bash
 python web/api.py
 ```
 
-**Dashboard** (port `8000` by default):
+Дашборд (по умолчанию **8000**):
 
 ```bash
 python web/dashboard_enhanced.py
 ```
 
-**Windows:** `START.bat` launches API and dashboard in separate console windows, then runs `main.py` in the current window.
+Windows: **`START.bat`**.
+
+Документация API в браузере: `http://localhost:8001/docs`
 
 ---
 
-## Repository layout
-
-```
-agents/          # All analysis agents
-bot/             # Telegram / Discord / Email helpers
-core/            # DB, routing, metrics, health, WebSocket helpers, analytics, logging
-web/             # FastAPI API + enhanced dashboard
-tests/           # Pytest smoke tests
-main.py          # Orchestrates agents + router + optional Telegram
-config.py        # Local secrets & tuning (not in git — use example as template)
-```
-
----
-
-## Tests
+## Тесты
 
 ```bash
 pytest
 ```
 
-Smoke tests cover imports, a SQLite signal round-trip, config example validity, and aggregator reason extraction.
-
 ---
 
-## Utility scripts
+## Важно
 
-| Script | Purpose |
-|--------|---------|
-| `check_system_status.py` | Quick dependency, config, DB, log folder, and port check. |
-| `check_agents.py` | Rich printout of DB activity by agent and symbol. |
-| `check_signals.py` | Signal counts, Telegram sent flags, stable-coin noise notes. |
-| `test_run.py` | Long-running dry run with **mock** Telegram (console only). |
-| `get_chat_id.py` | Resolve chat id after you message the bot (`TELEGRAM_BOT_TOKEN` required in env). |
-| `setup_telegram.py` | Interactive flow that can write `.env` with token + chat id. |
-| `test_telegram_send.py` | Sends one test message using `config.py` / env. |
-
----
-
-## Requirements
-
-- **Python 3.10+**
-- Install: `pip install -r requirements.txt`
-
----
-
-## Limitations (set expectations with clients)
-
-- **No order execution** — no Binance signed orders, no portfolio sync, no position sizing engine in-tree.
-- **Public data bias** — quality depends on **Binance public streams** and **third-party HTTP APIs** (rate limits, outages, geographic restrictions).
-- **Heuristics, not guarantees** — signals are **rule-based scores**, not a verified predictive model; false positives are expected in volatile markets.
-- **Single-node SQLite** — great for one server; for heavy multi-user SaaS you would likely migrate storage and add auth layers yourself.
-- **Regulatory / compliance** — operators remain responsible for how alerts are used; this README is **not financial advice**.
-
----
-
-## License / disclaimer
-
-Use at your own risk. **Not financial advice.** Past signal frequency does not imply future performance.
+Использование — **на ваш риск**. Это **не финансовая консультация**. Сигналы носят ознакомительный характер.
