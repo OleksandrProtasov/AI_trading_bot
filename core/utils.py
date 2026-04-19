@@ -176,3 +176,6 @@ def calculate_percentage_change(old_value: float, new_value: float) -> float:
         return 0.0
     return ((new_value - old_value) / old_value) * 100.0
 
+
+
+

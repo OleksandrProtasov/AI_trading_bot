@@ -1,6 +1,4 @@
-"""
-onchain_agent.py - отслеживание ончейн данных, whale транзакций
-"""
+"""DEX / flow heuristics (DexScreener-based); not a full chain indexer."""
 import asyncio
 import aiohttp
 from typing import Dict, List, Optional
@@ -50,18 +48,18 @@ class OnChainAgent:
                                 url = f"{config.dexscreener.base_url}/tokens/{symbol}"
                                 timeout = aiohttp.ClientTimeout(total=config.dexscreener.timeout)
                                 async with session.get(url, timeout=timeout) as resp:
-                                if resp.status == 200:
-                                    data = await resp.json()
-                                    await self._process_dex_data(symbol, data)
-                                elif resp.status == 429:
-                                    self.logger.warning(f"Rate limit для {symbol}, пропускаем")
-                                    await asyncio.sleep(5)
+                                    if resp.status == 200:
+                                        data = await resp.json()
+                                        await self._process_dex_data(symbol, data)
+                                    elif resp.status == 429:
+                                        self.logger.warning("Rate limited for %s, skip", symbol)
+                                        await asyncio.sleep(5)
                         except Exception as e:
-                            self.logger.debug(f"Ошибка получения данных для {symbol}: {e}")
+                            self.logger.debug("Fetch error for %s: %s", symbol, e)
                 
                 await asyncio.sleep(config.agent.onchain_check_interval)
             except Exception as e:
-                self.logger.error(f"Ошибка отслеживания whale: {e}", exc_info=True)
+                self.logger.error("Whale monitor error: %s", e, exc_info=True)
                 await asyncio.sleep(10)
     
     async def _process_dex_data(self, symbol: str, data: Dict):
@@ -104,7 +102,9 @@ class OnChainAgent:
                             agent_type="onchain",
                             signal_type="whale_activity",
                             priority=Priority.HIGH,
-                            message=f"Whale активность на {symbol}: объем 24h = ${volume_usd:,.0f}",
+                            message=(
+                                f"Heavy flow on {symbol}: 24h volume ≈ ${volume_usd:,.0f}"
+                            ),
                             symbol=symbol,
                             data={
                                 'volume_usd': volume_usd,
@@ -127,7 +127,7 @@ class OnChainAgent:
                             data={'buys': buys, 'sells': sells}
                         )
         except Exception as e:
-            self.logger.error(f"Ошибка обработки DEX данных: {e}", exc_info=True)
+            self.logger.error("DEX data handling error: %s", e, exc_info=True)
     
     async def _track_exchange_flows(self):
         """Отслеживание вводов/выводов на биржи"""
@@ -139,7 +139,7 @@ class OnChainAgent:
                 # Симуляция: в реальности здесь будет запрос к API
                 await asyncio.sleep(60)  # Проверка каждую минуту
             except Exception as e:
-                self.logger.error(f"Ошибка отслеживания flows: {e}", exc_info=True)
+                self.logger.error("Flow monitor error: %s", e, exc_info=True)
                 await asyncio.sleep(10)
     
     async def _analyze_accumulation(self):
@@ -151,7 +151,7 @@ class OnChainAgent:
                 
                 await asyncio.sleep(300)  # Анализ каждые 5 минут
             except Exception as e:
-                self.logger.error(f"Ошибка анализа accumulation: {e}", exc_info=True)
+                self.logger.error("Accumulation analysis error: %s", e, exc_info=True)
                 await asyncio.sleep(10)
     
     async def stop(self):

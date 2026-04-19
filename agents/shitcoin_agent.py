@@ -1,6 +1,4 @@
-"""
-shitcoin_agent.py - анализ DEX токенов, щиткоинов, пампов/дампов
-"""
+"""High-volatility DEX pairs via DexScreener (meme / pump-scan heuristics)."""
 import asyncio
 import aiohttp
 from typing import Dict, List, Optional
@@ -41,15 +39,17 @@ class ShitcoinAgent:
                         url = f"{config.dexscreener.base_url}/search?q=USDT"
                         timeout = aiohttp.ClientTimeout(total=config.dexscreener.timeout)
                         async with session.get(url, timeout=timeout) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            await self._process_dex_tokens(data)
-                        else:
-                            self.logger.warning(f"DexScreener API вернул статус {resp.status}")
+                            if resp.status == 200:
+                                data = await resp.json()
+                                await self._process_dex_tokens(data)
+                            else:
+                                self.logger.warning(
+                                    f"DexScreener API returned status {resp.status}"
+                                )
                 
                 await asyncio.sleep(config.agent.shitcoin_scan_interval)
             except Exception as e:
-                self.logger.error(f"Ошибка сканирования DEX: {e}", exc_info=True)
+                self.logger.error("DEX scan error: %s", e, exc_info=True)
                 await asyncio.sleep(10)
     
     async def _process_dex_tokens(self, data: Dict):
@@ -78,12 +78,12 @@ class ShitcoinAgent:
                     volume_24h = float(pair.get('volume', {}).get('h24', 0) or 0)
                     liquidity_usd = float(pair.get('liquidity', {}).get('usd', 0) or 0)
                 except (ValueError, TypeError) as e:
-                    self.logger.debug(f"Пропущен токен {symbol}: невалидные данные - {e}")
+                    self.logger.debug("Skip token %s (invalid metrics): %s", symbol, e)
                     continue
                 
                 # Улучшенная проверка стабильных монет
                 if is_stable_coin(symbol, self.stable_coins, price_usd):
-                    self.logger.debug(f"Пропущен стабильный токен: {symbol} (цена: {price_usd})")
+                    self.logger.debug("Skip stable-like token %s price=%s", symbol, price_usd)
                     continue
                 
                 # Фильтруем по критериям щиткоина
@@ -98,11 +98,13 @@ class ShitcoinAgent:
                             agent_type="shitcoin",
                             signal_type="new_shitcoin",
                             priority=Priority.MEDIUM if risk_level < 0.7 else Priority.HIGH,
-                            message=f"Обнаружен щиткоин: {symbol} ({token_name})\n"
-                                   f"Изменение 24h: {price_change_24h:.2f}%\n"
-                                   f"Объем: ${volume_24h:,.0f}\n"
-                                   f"Ликвидность: ${liquidity_usd:,.0f}\n"
-                                   f"Риск: {risk_level:.2%}",
+                            message=(
+                                f"High-risk DEX pair: {symbol} ({token_name})\n"
+                                f"24h change: {price_change_24h:.2f}%\n"
+                                f"Volume: ${volume_24h:,.0f}\n"
+                                f"Liquidity: ${liquidity_usd:,.0f}\n"
+                                f"Risk score: {risk_level:.2%}"
+                            ),
                             symbol=symbol,
                             data={
                                 'price': price_usd,
@@ -120,7 +122,9 @@ class ShitcoinAgent:
                         await self.db.save_anomaly(
                             symbol=symbol,
                             anomaly_type="shitcoin_detected",
-                            description=f"Обнаружен щиткоин с изменением {price_change_24h:.2f}%",
+                            description=(
+                                f"Volatile DEX token, 24h change {price_change_24h:.2f}%"
+                            ),
                             severity="high" if risk_level > 0.7 else "medium",
                             data={'risk': risk_level, 'volume': volume_24h}
                         )
@@ -134,9 +138,11 @@ class ShitcoinAgent:
                         agent_type="shitcoin",
                         signal_type=signal_type,
                         priority=priority,
-                        message=f"{'🚀 ПАМП' if signal_type == 'pump' else '💥 ДАМП'} на {symbol}!\n"
-                               f"Изменение: {price_change_24h:.2f}%\n"
-                               f"Объем: ${volume_24h:,.0f}",
+                        message=(
+                            f"{'🚀 PUMP' if signal_type == 'pump' else '💥 DUMP'} on {symbol}!\n"
+                            f"Change: {price_change_24h:.2f}%\n"
+                            f"Volume: ${volume_24h:,.0f}"
+                        ),
                         symbol=symbol,
                         data={
                             'price': price_usd,
@@ -148,7 +154,7 @@ class ShitcoinAgent:
                     await self.event_router.add_signal(signal)
                     
         except Exception as e:
-            self.logger.error(f"Ошибка обработки токенов: {e}", exc_info=True)
+            self.logger.error("Token processing error: %s", e, exc_info=True)
     
     def _is_shitcoin(self, pair: Dict, price_change: float, volume: float, liquidity: float) -> bool:
         """Определение, является ли токен щиткоином"""
@@ -199,15 +205,15 @@ class ShitcoinAgent:
                                 url = f"{config.dexscreener.base_url}/tokens/{token_address}"
                                 timeout = aiohttp.ClientTimeout(total=config.dexscreener.timeout)
                                 async with session.get(url, timeout=timeout) as resp:
-                                if resp.status == 200:
-                                    data = await resp.json()
-                                    await self._check_pump_dump_patterns(data)
+                                    if resp.status == 200:
+                                        data = await resp.json()
+                                        await self._check_pump_dump_patterns(data)
                     except Exception as e:
-                        self.logger.debug(f"Ошибка анализа токена {token_address}: {e}")
+                        self.logger.debug("Token poll error %s: %s", token_address, e)
                 
                 await asyncio.sleep(30)  # Проверка каждые 30 секунд
             except Exception as e:
-                self.logger.error(f"Ошибка анализа pump/dump: {e}", exc_info=True)
+                self.logger.error("Pump/dump loop error: %s", e, exc_info=True)
                 await asyncio.sleep(10)
     
     async def _check_pump_dump_patterns(self, data: Dict):
@@ -236,9 +242,11 @@ class ShitcoinAgent:
                         agent_type="shitcoin",
                         signal_type="rapid_pump",
                         priority=Priority.URGENT,
-                        message=f"⚡ БЫСТРЫЙ ПАМП на {symbol}!\n"
-                               f"Рост за 5 минут: {price_change_5m:.2f}%\n"
-                               f"Рост за 1 час: {price_change_1h:.2f}%",
+                        message=(
+                            f"⚡ FAST PUMP on {symbol}!\n"
+                            f"5m: +{price_change_5m:.2f}%\n"
+                            f"1h: +{price_change_1h:.2f}%"
+                        ),
                         symbol=symbol,
                         data={
                             'change_5m': price_change_5m,
@@ -254,9 +262,11 @@ class ShitcoinAgent:
                         agent_type="shitcoin",
                         signal_type="rapid_dump",
                         priority=Priority.URGENT,
-                        message=f"💥 БЫСТРЫЙ ДАМП на {symbol}!\n"
-                               f"Падение за 5 минут: {price_change_5m:.2f}%\n"
-                               f"Падение за 1 час: {price_change_1h:.2f}%",
+                        message=(
+                            f"💥 FAST DUMP on {symbol}!\n"
+                            f"5m: {price_change_5m:.2f}%\n"
+                            f"1h: {price_change_1h:.2f}%"
+                        ),
                         symbol=symbol,
                         data={
                             'change_5m': price_change_5m,
@@ -266,7 +276,7 @@ class ShitcoinAgent:
                     )
                     await self.event_router.add_signal(signal)
         except Exception as e:
-            self.logger.error(f"Ошибка проверки паттернов: {e}", exc_info=True)
+            self.logger.error("Pattern check error: %s", e, exc_info=True)
     
     async def stop(self):
         """Остановка агента"""

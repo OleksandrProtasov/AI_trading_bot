@@ -1,6 +1,4 @@
-"""
-dashboard_enhanced.py - Расширенный веб-дашборд с фильтрами и графиками
-"""
+"""Enhanced FastAPI dashboard: filters, charts, WebSocket refresh."""
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,7 +19,7 @@ from core.analytics import Analytics
 
 app = FastAPI(title="Crypto Analytics Dashboard Enhanced")
 
-# Глобальные переменные
+# process-level singletons (dashboard process only)
 db: Database = None
 health_check: HealthCheck = None
 metrics: Metrics = None
@@ -31,7 +29,7 @@ active_connections: List[WebSocket] = []
 
 @app.on_event("startup")
 async def startup_event():
-    """Инициализация при запуске"""
+    """Wire DB + metrics on startup."""
     global db, health_check, metrics, analytics
     db = Database("crypto_analytics.db")
     health_check = HealthCheck()
@@ -41,10 +39,10 @@ async def startup_event():
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
-    """Главная страница расширенного дашборда"""
+    """Serve single-page dashboard HTML."""
     html_content = """
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -173,13 +171,13 @@ async def get_dashboard():
     <div class="container">
         <div class="header">
             <h1>🚀 Crypto Analytics Dashboard</h1>
-            <p>Мониторинг в реальном времени с расширенными возможностями</p>
+            <p>Live signal overview, filters, and charts</p>
         </div>
         
         <div class="filters">
-            <input type="text" id="search-input" placeholder="🔍 Поиск по символу или сообщению...">
+            <input type="text" id="search-input" placeholder="🔍 Search symbol or message...">
             <select id="agent-filter">
-                <option value="">Все агенты</option>
+                <option value="">All agents</option>
                 <option value="market">Market</option>
                 <option value="onchain">OnChain</option>
                 <option value="liquidity">Liquidity</option>
@@ -188,67 +186,67 @@ async def get_dashboard():
                 <option value="aggregator">Aggregator</option>
             </select>
             <select id="type-filter">
-                <option value="">Все типы</option>
+                <option value="">All types</option>
                 <option value="BUY">BUY</option>
                 <option value="SELL">SELL</option>
                 <option value="EXIT">EXIT</option>
                 <option value="WAIT">WAIT</option>
             </select>
             <select id="hours-filter">
-                <option value="1">Последний час</option>
-                <option value="6">Последние 6 часов</option>
-                <option value="24" selected>Последние 24 часа</option>
-                <option value="168">Последняя неделя</option>
+                <option value="1">Last hour</option>
+                <option value="6">Last 6 hours</option>
+                <option value="24" selected>Last 24 hours</option>
+                <option value="168">Last week</option>
             </select>
-            <button class="btn" onclick="applyFilters()">Применить</button>
-            <button class="btn" onclick="exportData()">📥 Экспорт</button>
+            <button class="btn" onclick="applyFilters()">Apply</button>
+            <button class="btn" onclick="exportData()">📥 Export</button>
         </div>
         
         <div class="stats-grid">
             <div class="stat-card">
-                <h3>Всего сигналов</h3>
+                <h3>Total signals</h3>
                 <div class="value" id="total-signals">0</div>
             </div>
             <div class="stat-card">
-                <h3>Сигналов за 24ч</h3>
+                <h3>Signals (window)</h3>
                 <div class="value" id="signals-24h">0</div>
             </div>
             <div class="stat-card">
-                <h3>Активных агентов</h3>
+                <h3>Active agents</h3>
                 <div class="value" id="active-agents">0</div>
             </div>
             <div class="stat-card">
-                <h3>Уверенность</h3>
+                <h3>Avg confidence</h3>
                 <div class="value" id="avg-confidence">0%</div>
             </div>
         </div>
         
         <div class="chart-container">
-            <h2 style="margin-bottom: 20px;">📈 Сигналы по времени</h2>
+            <h2 style="margin-bottom: 20px;">📈 Signals over time</h2>
             <canvas id="signalsChart"></canvas>
         </div>
         
         <div class="chart-container">
-            <h2 style="margin-bottom: 20px;">📊 Сигналы по агентам</h2>
+            <h2 style="margin-bottom: 20px;">📊 Signals by agent</h2>
             <canvas id="agentsChart"></canvas>
         </div>
         
         <div class="signals-table">
-            <h2 style="padding: 20px; margin: 0;">📋 Последние сигналы</h2>
+            <h2 style="padding: 20px; margin: 0;">📋 Recent signals</h2>
             <table>
                 <thead>
                     <tr>
-                        <th>Время</th>
-                        <th>Символ</th>
-                        <th>Действие</th>
-                        <th>Цена</th>
-                        <th>Уверенность</th>
-                        <th>Риск</th>
-                        <th>Агент</th>
+                        <th>Time</th>
+                        <th>Symbol</th>
+                        <th>Action</th>
+                        <th>Price</th>
+                        <th>Confidence</th>
+                        <th>Risk</th>
+                        <th>Agent</th>
                     </tr>
                 </thead>
                 <tbody id="signals-tbody">
-                    <tr><td colspan="7" style="text-align: center; padding: 40px;">Загрузка...</td></tr>
+                    <tr><td colspan="7" style="text-align: center; padding: 40px;">Loading...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -260,7 +258,7 @@ async def get_dashboard():
         let currentFilters = { hours: 24 };
         
         ws.onopen = () => {
-            console.log('WebSocket подключен');
+            console.log('WebSocket connected');
         };
         
         ws.onmessage = (event) => {
@@ -325,12 +323,12 @@ async def get_dashboard():
         function updateSignalsTable(signals) {
             const tbody = document.getElementById('signals-tbody');
             if (signals.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 40px;">Нет сигналов</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 40px;">No signals</td></tr>';
                 return;
             }
             
             tbody.innerHTML = signals.map(signal => {
-                const time = new Date(signal.timestamp * 1000).toLocaleString('ru-RU');
+                const time = new Date(signal.timestamp * 1000).toLocaleString();
                 const actionClass = `signal-${(signal.action || signal.signal_type || '').toLowerCase()}`;
                 return `
                     <tr>
@@ -354,7 +352,7 @@ async def get_dashboard():
                     data: {
                         labels: chartData.labels || [],
                         datasets: [{
-                            label: 'Сигналы',
+                            label: 'Signals',
                             data: chartData.data || [],
                             borderColor: '#667eea',
                             backgroundColor: 'rgba(102, 126, 234, 0.1)',
@@ -408,10 +406,7 @@ async def get_dashboard():
             }
         }
         
-        // Запрос начальных данных
         loadData();
-        
-        // Автообновление каждые 30 секунд
         setInterval(loadData, 30000);
     </script>
 </body>
@@ -426,12 +421,9 @@ async def get_dashboard_data(
     agent_type: Optional[str] = None,
     signal_type: Optional[str] = None
 ):
-    """Получение данных для расширенного дашборда"""
+    """JSON payload for dashboard charts and table."""
     try:
-        # Статистика
         stats = await metrics.get_statistics(hours)
-        
-        # Последние сигналы
         conn = sqlite3.connect(db.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -465,7 +457,7 @@ async def get_dashboard_data(
                 'message': row['message']
             })
         
-        # Данные для графика сигналов
+        # hourly histogram
         cursor.execute("""
             SELECT strftime('%H', datetime(timestamp, 'unixepoch')) as hour, COUNT(*) as count
             FROM signals
@@ -478,7 +470,7 @@ async def get_dashboard_data(
         chart_labels = [f"{i:02d}:00" for i in range(24)]
         chart_data = [hour_data.get(f"{i:02d}", 0) for i in range(24)]
         
-        # Данные по агентам
+        # per-agent counts
         cursor.execute("""
             SELECT agent_type, COUNT(*) as count
             FROM signals
@@ -515,7 +507,7 @@ async def get_dashboard_data(
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket для real-time обновлений"""
+    """Push dashboard JSON every few seconds."""
     await websocket.accept()
     active_connections.append(websocket)
     
@@ -531,4 +523,7 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+
 

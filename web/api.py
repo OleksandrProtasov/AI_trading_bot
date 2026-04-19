@@ -1,6 +1,4 @@
-"""
-api.py - Расширенный REST API
-"""
+"""FastAPI REST surface for signals, metrics, export, and search."""
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from typing import Optional, List
@@ -20,7 +18,7 @@ from core.health_check import HealthCheck
 
 app = FastAPI(title="Crypto Analytics API", version="1.0.0")
 
-# Глобальные переменные
+# module singletons
 db: Database = None
 metrics: Metrics = None
 health_check: HealthCheck = None
@@ -34,7 +32,7 @@ async def startup_event():
     health_check = HealthCheck()
 
 
-# ========== СИГНАЛЫ ==========
+# --- Signals ---
 
 @app.get("/api/signals")
 async def get_signals(
@@ -45,7 +43,7 @@ async def get_signals(
     signal_type: Optional[str] = None,
     hours: int = Query(24, ge=1, le=720)
 ):
-    """Получение списка сигналов с фильтрацией"""
+    """List signals with optional filters."""
     try:
         conn = sqlite3.connect(db.db_path)
         conn.row_factory = sqlite3.Row
@@ -89,7 +87,7 @@ async def get_signals(
                 'sent_to_telegram': bool(row['sent_to_telegram'])
             })
         
-        # Общее количество
+        # total count
         count_query = query.replace("ORDER BY timestamp DESC LIMIT ? OFFSET ?", "")
         cursor.execute(count_query, params[:-2])
         total = len(cursor.fetchall())
@@ -108,7 +106,7 @@ async def get_signals(
 
 @app.get("/api/signals/{signal_id}")
 async def get_signal(signal_id: int):
-    """Получение конкретного сигнала"""
+    """Fetch one signal by id."""
     try:
         conn = sqlite3.connect(db.db_path)
         conn.row_factory = sqlite3.Row
@@ -141,11 +139,11 @@ async def get_signal(signal_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ========== МЕТРИКИ ==========
+# --- Metrics ---
 
 @app.get("/api/metrics")
 async def get_metrics(hours: int = Query(24, ge=1, le=720)):
-    """Получение метрик системы"""
+    """Aggregate counters from SQLite."""
     try:
         stats = await metrics.get_statistics(hours)
         return stats
@@ -155,7 +153,7 @@ async def get_metrics(hours: int = Query(24, ge=1, le=720)):
 
 @app.get("/api/metrics/summary")
 async def get_metrics_summary():
-    """Краткая сводка метрик"""
+    """Compact metrics snapshot."""
     try:
         summary = metrics.get_summary()
         stats = await metrics.get_statistics(24)
@@ -172,26 +170,26 @@ async def get_metrics_summary():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ========== АГЕНТЫ ==========
+# --- Agents ---
 
 @app.get("/api/agents")
 async def get_agents():
-    """Список всех агентов"""
+    """Static catalog of agent roles."""
     return {
         'agents': [
-            {'name': 'market', 'description': 'Market Agent - анализ рыночных данных'},
-            {'name': 'onchain', 'description': 'OnChain Agent - отслеживание whale транзакций'},
-            {'name': 'liquidity', 'description': 'Liquidity Agent - анализ ликвидности'},
-            {'name': 'shitcoin', 'description': 'Shitcoin Agent - поиск пампов/дампов'},
-            {'name': 'emergency', 'description': 'Emergency Agent - срочные сигналы'},
-            {'name': 'aggregator', 'description': 'Aggregator Agent - агрегация сигналов'}
+            {"name": "market", "description": "Market data + TA-style heuristics"},
+            {"name": "onchain", "description": "DEX flow / whale-style volume heuristics"},
+            {"name": "liquidity", "description": "Order book imbalance and liquidity pockets"},
+            {"name": "shitcoin", "description": "High-volatility DEX meme scanner"},
+            {"name": "emergency", "description": "Fast volume/price/liquidity alerts"},
+            {"name": "aggregator", "description": "Weighted BUY/SELL/EXIT/WAIT synthesis"},
         ]
     }
 
 
 @app.get("/api/agents/status")
 async def get_agents_status():
-    """Статус всех агентов"""
+    """Optional hook for live agent heartbeats (placeholder)."""
     try:
         if health_check:
             status = await health_check.check_health()
@@ -200,21 +198,21 @@ async def get_agents_status():
                 'summary': health_check.get_status_summary(),
                 'timestamp': int(datetime.utcnow().timestamp())
             }
-        return {'agents': {}, 'summary': 'Health check не инициализирован'}
+        return {"agents": {}, "summary": "Health check not wired in API process"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ========== СВЕЧИ ==========
+# --- Candles ---
 
 @app.get("/api/candles")
 async def get_candles(
-    symbol: str = Query(..., description="Символ (например, BTCUSDT)"),
-    timeframe: str = Query("1m", description="Таймфрейм"),
+    symbol: str = Query(..., description="Symbol, e.g. BTCUSDT"),
+    timeframe: str = Query("1m", description="Candle interval"),
     limit: int = Query(100, ge=1, le=1000),
     hours: int = Query(24, ge=1, le=720)
 ):
-    """Получение свечей"""
+    """Return recent OHLCV rows."""
     try:
         conn = sqlite3.connect(db.db_path)
         conn.row_factory = sqlite3.Row
@@ -247,14 +245,14 @@ async def get_candles(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ========== ЭКСПОРТ ==========
+# --- Export ---
 
 @app.get("/api/export/csv")
 async def export_csv(
     hours: int = Query(24, ge=1, le=720),
     symbol: Optional[str] = None
 ):
-    """Экспорт сигналов в CSV"""
+    """Download signals as CSV."""
     try:
         conn = sqlite3.connect(db.db_path)
         conn.row_factory = sqlite3.Row
@@ -276,10 +274,10 @@ async def export_csv(
         output = io.StringIO()
         writer = csv.writer(output)
         
-        # Заголовки
+        # header row
         writer.writerow(['ID', 'Timestamp', 'Agent', 'Symbol', 'Type', 'Priority', 'Message'])
         
-        # Данные
+        # body rows
         for row in rows:
             writer.writerow([
                 row['id'],
@@ -307,7 +305,7 @@ async def export_json(
     hours: int = Query(24, ge=1, le=720),
     symbol: Optional[str] = None
 ):
-    """Экспорт сигналов в JSON"""
+    """Download signals as JSON."""
     try:
         conn = sqlite3.connect(db.db_path)
         conn.row_factory = sqlite3.Row
@@ -346,14 +344,14 @@ async def export_json(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ========== ПОИСК ==========
+# --- Search ---
 
 @app.get("/api/search")
 async def search(
-    q: str = Query(..., description="Поисковый запрос"),
+    q: str = Query(..., description="Free-text query"),
     limit: int = Query(50, ge=1, le=100)
 ):
-    """Поиск по сигналам"""
+    """Simple LIKE search across stored signals."""
     try:
         conn = sqlite3.connect(db.db_path)
         conn.row_factory = sqlite3.Row
@@ -389,11 +387,11 @@ async def search(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ========== СТАТИСТИКА ==========
+# --- Statistics ---
 
 @app.get("/api/stats/symbols")
 async def get_symbols_stats(hours: int = Query(24, ge=1, le=720)):
-    """Статистика по символам"""
+    """Per-symbol counts for a time window."""
     try:
         conn = sqlite3.connect(db.db_path)
         conn.row_factory = sqlite3.Row
@@ -429,7 +427,7 @@ async def get_symbols_stats(hours: int = Query(24, ge=1, le=720)):
 
 @app.get("/api/stats/performance")
 async def get_performance_stats():
-    """Статистика производительности"""
+    """Placeholder performance stats."""
     try:
         stats = await metrics.get_statistics(24)
         return {
@@ -447,4 +445,7 @@ async def get_performance_stats():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)
+
+
+
 

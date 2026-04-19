@@ -1,11 +1,8 @@
-"""
-telegram_bot.py - Telegram бот для отправки сигналов и отчетов
-"""
-import asyncio
-from typing import Optional
+"""Telegram delivery for signals and periodic HTML reports."""
 from telegram import Bot
 from telegram.error import TelegramError
-from core.event_router import Signal, EventRouter
+
+from core.event_router import Signal
 from core.logger import get_logger
 
 
@@ -15,128 +12,106 @@ class TelegramBot:
         self.chat_id = chat_id
         self.running = False
         self.logger = get_logger(__name__)
-    
+
     async def send_signal(self, signal: Signal):
-        """Отправка сигнала в Telegram"""
         try:
             message = self._format_signal_message(signal)
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 text=message,
-                parse_mode='HTML',
-                disable_web_page_preview=True
+                parse_mode="HTML",
+                disable_web_page_preview=True,
             )
-            self.logger.info(f"Сигнал отправлен: {signal.agent_type} - {signal.signal_type}")
+            self.logger.info(
+                "Signal sent: %s - %s", signal.agent_type, signal.signal_type
+            )
         except TelegramError as e:
-            self.logger.error(f"Ошибка отправки сообщения: {e}")
+            self.logger.error("Telegram send failed: %s", e)
         except Exception as e:
-            self.logger.error(f"Неожиданная ошибка: {e}", exc_info=True)
-    
+            self.logger.error("Unexpected Telegram error: %s", e, exc_info=True)
+
     def _format_signal_message(self, signal: Signal) -> str:
-        """Форматирование сообщения для Telegram"""
-        # Приоритеты и эмодзи
         priority_emoji = {
             "critical": "🚨",
             "urgent": "⚡",
             "high": "🔥",
             "medium": "📊",
-            "low": "ℹ️"
+            "low": "ℹ️",
         }
-        
         agent_emoji = {
             "market": "📈",
             "onchain": "🐋",
             "liquidity": "💧",
             "shitcoin": "💩",
-            "emergency": "🚨"
+            "emergency": "🚨",
         }
-        
         emoji = priority_emoji.get(signal.priority.value, "📌")
         agent_icon = agent_emoji.get(signal.agent_type, "🤖")
-        
-        # Заголовок
-        header = f"{emoji} {agent_icon} <b>{signal.agent_type.upper()}</b> - {signal.signal_type.upper()}"
+        header = (
+            f"{emoji} {agent_icon} <b>{signal.agent_type.upper()}</b> - "
+            f"{signal.signal_type.upper()}"
+        )
         if signal.symbol:
             header += f" | {signal.symbol}"
-        
         message = f"{header}\n\n{signal.message}"
-        
-        # Дополнительные данные
         if signal.data:
             details = []
-            
             if "price" in signal.data:
-                details.append(f"💰 <b>Цена:</b> {signal.data['price']:.6f}")
-            
+                details.append(f"💰 <b>Price:</b> {signal.data['price']:.6f}")
             if "volume" in signal.data:
-                details.append(f"📊 <b>Объем:</b> ${signal.data['volume']:,.0f}")
-            
+                details.append(f"📊 <b>Volume:</b> ${signal.data['volume']:,.0f}")
             if "change" in signal.data or "change_24h" in signal.data:
                 change = signal.data.get("change") or signal.data.get("change_24h", 0)
                 try:
                     change = float(change) if change is not None else 0
                     change_emoji = "📈" if change > 0 else "📉"
-                    details.append(f"{change_emoji} <b>Изменение:</b> {change:.2f}%")
+                    details.append(f"{change_emoji} <b>Change:</b> {change:.2f}%")
                 except (ValueError, TypeError):
                     pass
-            
             if "reason" in signal.data:
-                details.append(f"💡 <b>Причина:</b> {signal.data['reason']}")
-            
+                details.append(f"💡 <b>Reason:</b> {signal.data['reason']}")
             if "action" in signal.data:
-                action_emoji = "🟢" if signal.data['action'] == "BUY" else "🔴"
-                details.append(f"{action_emoji} <b>Рекомендация:</b> {signal.data['action']}")
-            
+                action_emoji = "🟢" if signal.data["action"] == "BUY" else "🔴"
+                details.append(f"{action_emoji} <b>Action:</b> {signal.data['action']}")
             if "risk" in signal.data:
-                risk = signal.data['risk']
+                risk = signal.data["risk"]
                 try:
                     risk = float(risk) if risk is not None else 0
                     risk_emoji = "🔴" if risk > 0.7 else "🟡" if risk > 0.4 else "🟢"
-                    details.append(f"{risk_emoji} <b>Риск:</b> {risk:.1%}")
+                    details.append(f"{risk_emoji} <b>Risk:</b> {risk:.1%}")
                 except (ValueError, TypeError):
                     pass
-            
             if "support" in signal.data:
-                details.append(f"📉 <b>Поддержка:</b> {signal.data['support']:.6f}")
-            
+                details.append(f"📉 <b>Support:</b> {signal.data['support']:.6f}")
             if "resistance" in signal.data:
-                details.append(f"📈 <b>Сопротивление:</b> {signal.data['resistance']:.6f}")
-            
+                details.append(f"📈 <b>Resistance:</b> {signal.data['resistance']:.6f}")
             if "imbalance" in signal.data:
-                imbalance = signal.data['imbalance']
+                imbalance = signal.data["imbalance"]
                 try:
                     imbalance = float(imbalance) if imbalance is not None else 0
-                    direction = "Покупка" if imbalance > 0 else "Продажа"
-                    details.append(f"⚖️ <b>Имбаланс:</b> {abs(imbalance):.1%} ({direction})")
+                    direction = "bids" if imbalance > 0 else "asks"
+                    details.append(
+                        f"⚖️ <b>Imbalance:</b> {abs(imbalance):.1%} ({direction})"
+                    )
                 except (ValueError, TypeError):
                     pass
-            
             if details:
                 message += "\n\n" + "\n".join(details)
-        
-        # Время
         message += f"\n\n⏰ <i>{signal.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
-        
         return message
-    
+
     async def send_daily_report(self, report_text: str):
-        """Отправка ежедневного отчета"""
         try:
             await self.bot.send_message(
                 chat_id=self.chat_id,
-                text=f"📊 <b>Ежедневный отчет</b>\n\n{report_text}",
-                parse_mode='HTML'
+                text=f"📊 <b>Report</b>\n\n{report_text}",
+                parse_mode="HTML",
             )
         except Exception as e:
-            self.logger.error(f"Ошибка отправки отчета: {e}", exc_info=True)
-    
-    async def start(self):
-        """Запуск бота (для polling, если нужно)"""
-        self.running = True
-        # Здесь можно добавить polling для команд, если нужно
-        pass
-    
-    async def stop(self):
-        """Остановка бота"""
-        self.running = False
+            self.logger.error("Report send failed: %s", e, exc_info=True)
 
+    async def start(self):
+        self.running = True
+
+    async def stop(self):
+        self.running = False

@@ -110,3 +110,6 @@ Crypto Analytics System
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, _send)
 
+
+
+

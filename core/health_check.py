@@ -130,3 +130,6 @@ class HealthCheck:
             summary.append(f"{emoji} {agent_name}: {info['status'].value}")
         return "\n".join(summary)
 
+
+
+

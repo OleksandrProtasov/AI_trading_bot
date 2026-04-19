@@ -58,3 +58,6 @@ class RateLimiter:
 dex_screener_limiter = RateLimiter(max_calls=10, time_window=1.0)  # 10 запросов в секунду
 binance_limiter = RateLimiter(max_calls=1200, time_window=60.0)  # 1200 запросов в минуту
 
+
+
+

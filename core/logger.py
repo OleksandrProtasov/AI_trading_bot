@@ -1,6 +1,4 @@
-"""
-logger.py - централизованная система логирования
-"""
+"""Rotating file + console logging helpers."""
 import logging
 import os
 from datetime import datetime
@@ -67,4 +65,7 @@ def get_logger(name: str) -> logging.Logger:
     if not logger.handlers:
         return setup_logger(name)
     return logger
+
+
+
 

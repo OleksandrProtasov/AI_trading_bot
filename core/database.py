@@ -1,6 +1,4 @@
-"""
-database.py - работа с SQLite для хранения данных
-"""
+"""Async-friendly SQLite access for candles, signals, and auxiliary tables."""
 import sqlite3
 import asyncio
 from datetime import datetime

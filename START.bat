@@ -4,80 +4,72 @@ title Crypto Analytics System
 color 0A
 
 echo.
-echo ╔══════════════════════════════════════════════════════════╗
-echo ║     🚀 Crypto Analytics System - Быстрый запуск 🚀      ║
-echo ╚══════════════════════════════════════════════════════════╝
+echo ============================================================
+echo   Crypto Analytics System - quick start
+echo ============================================================
 echo.
 
-echo [1/4] Проверка Python...
+echo [1/4] Checking Python...
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo ❌ Python не найден! Установите Python 3.8+
+    echo ERROR: Python not found. Install Python 3.10+
     pause
     exit /b 1
 )
-echo ✅ Python найден
+echo OK: Python found
 
 echo.
-echo [2/4] Проверка зависимостей...
+echo [2/4] Checking dependencies...
 python -c "import fastapi, uvicorn, telegram, websockets, aiohttp" 2>nul
 if errorlevel 1 (
-    echo ⚠️  Некоторые зависимости отсутствуют
-    echo 📦 Установка зависимостей...
+    echo Installing dependencies...
     pip install -r requirements.txt
     if errorlevel 1 (
-        echo ❌ Ошибка установки зависимостей
+        echo ERROR: pip install failed
         pause
         exit /b 1
     )
-    echo ✅ Зависимости установлены
+    echo OK: Dependencies installed
 ) else (
-    echo ✅ Все зависимости установлены
+    echo OK: Core packages present
 )
 
 echo.
-echo [3/4] Проверка конфигурации...
+echo [3/4] Checking config...
 if exist "config.py" (
-    echo ✅ config.py найден
+    echo OK: config.py found
 ) else (
-    echo ⚠️  config.py не найден, используется config.py.example
+    echo WARNING: config.py missing — copy config.py.example to config.py
 )
 
 echo.
-echo [4/4] Запуск системы...
+echo [4/4] Starting services...
 echo.
-echo ═══════════════════════════════════════════════════════════
-echo   📊 Основная система будет запущена в этом окне
-echo   🌐 Веб-интерфейсы будут запущены в отдельных окнах
-echo ═══════════════════════════════════════════════════════════
+echo   Main app runs in this window. API and dashboard start separately.
+echo ============================================================
 echo.
 
 timeout /t 2 >nul
 
-echo 🚀 Запуск REST API (порт 8001)...
+echo Starting REST API on port 8001...
 start "Crypto Analytics - REST API" cmd /k "cd /d %~dp0 && python web/api.py"
 
 timeout /t 1 >nul
 
-echo 🌐 Запуск веб-дашборда (порт 8000)...
+echo Starting dashboard on port 8000...
 start "Crypto Analytics - Dashboard" cmd /k "cd /d %~dp0 && python web/dashboard_enhanced.py"
 
 timeout /t 1 >nul
 
 echo.
-echo ═══════════════════════════════════════════════════════════
-echo   ✅ Все компоненты запущены!
-echo ═══════════════════════════════════════════════════════════
+echo   Dashboard: http://localhost:8000
+echo   API:       http://localhost:8001
+echo   Docs:      http://localhost:8001/docs
 echo.
-echo   📊 Веб-дашборд: http://localhost:8000
-echo   🔌 REST API:    http://localhost:8001
-echo   📚 API Docs:    http://localhost:8001/docs
-echo.
-echo   Нажмите Ctrl+C для остановки основной системы
-echo ═══════════════════════════════════════════════════════════
+echo   Press Ctrl+C in this window to stop the main process.
+echo ============================================================
 echo.
 
 python main.py
 
 pause
-

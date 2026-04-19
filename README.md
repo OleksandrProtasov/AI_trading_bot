@@ -1,257 +1,111 @@
-# 🚀 Multi-Agent Crypto Analytics System
+# Multi-Agent Crypto Analytics
 
-Мультиагентная крипто-аналитическая система с Telegram уведомлениями и веб-дашбордом для анализа криптовалютного рынка в реальном времени.
+Real-time crypto market monitoring with specialized agents, signal aggregation, SQLite storage, optional Telegram alerts, a FastAPI REST API, and a web dashboard.
 
-## ✨ Возможности
+## Features
 
-- 📈 **Real-time анализ рынка** через Binance WebSocket
-- 🤖 **6 специализированных агентов** для разных типов анализа
-- 🎯 **Aggregator Agent** - централизованная агрегация и приоритизация сигналов
-- 📊 **Веб-дашборд** с графиками и статистикой
-- 🔌 **REST API** для интеграции
-- 🔔 **Множественные каналы уведомлений** (Telegram, Discord, Email)
-- 💾 **SQLite база данных** для хранения истории
-- 📈 **Аналитика и backtesting**
-- 📥 **Экспорт данных** (CSV, JSON)
+- **Binance WebSocket** — candles, order book, trades for configured symbols  
+- **Six agents** — market, on-chain (DEX volume / whale-style heuristics), liquidity, memecoin scanner, emergency alerts, aggregator  
+- **Aggregator** — combines inputs into weighted actions: BUY / SELL / EXIT / WAIT  
+- **SQLite** — signals and market data  
+- **Dashboard** — `web/dashboard_enhanced.py` (filters, charts, export)  
+- **REST API** — `web/api.py` (OpenAPI at `/docs`)  
+- **Notifications** — Telegram (primary), optional Discord / Email modules  
 
-## 🏗️ Архитектура
+This project is **analytics and alerting**, not an automated exchange execution engine.
 
-### Агенты:
+## Requirements
 
-1. **MarketAgent** - анализ рыночных данных (свечи, стакан, сделки)
-2. **OnChainAgent** - отслеживание whale транзакций
-3. **LiquidityAgent** - анализ зон ликвидности и стоп-кластеров
-4. **ShitcoinAgent** - поиск пампов/дампов на DEX
-5. **EmergencyAgent** - срочные сигналы (всплески объема, резкие изменения цены)
-6. **AggregatorAgent** - агрегация всех сигналов в финальные рекомендации (BUY/SELL/EXIT/WAIT)
+- Python 3.10+  
+- `pip install -r requirements.txt`  
 
-### Компоненты:
+## Configuration
 
-- **EventRouter** - маршрутизация сигналов между агентами
-- **Database** - SQLite для хранения данных
-- **TelegramBot** - отправка уведомлений
-- **HealthCheck** - мониторинг состояния агентов
-- **Metrics** - сбор статистики
-- **Analytics** - расширенная аналитика и backtesting
-
-## 🚀 Быстрый старт
-
-### 1. Установка зависимостей:
+1. Copy the example config and edit values (or use environment variables):
 
 ```bash
-pip install -r requirements.txt
+copy config.py.example config.py
 ```
 
-### 2. Настройка конфигурации:
-
-Отредактируйте `config.py` или установите переменные окружения:
+On Linux/macOS:
 
 ```bash
-# Windows PowerShell
-$env:TELEGRAM_BOT_TOKEN="ваш_токен"
-$env:TELEGRAM_CHAT_ID="ваш_chat_id"
-
-# Linux/Mac
-export TELEGRAM_BOT_TOKEN="ваш_токен"
-export TELEGRAM_CHAT_ID="ваш_chat_id"
+cp config.py.example config.py
 ```
 
-### 3. Запуск системы:
+2. Set at minimum:
 
-**Минимальный запуск (только основная система):**
+| Variable | Description |
+|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Bot token from [@BotFather](https://t.me/BotFather) |
+| `TELEGRAM_CHAT_ID` | Destination chat or channel ID |
+
+Optional: `LOG_LEVEL` (default `INFO`).
+
+`config.py` is listed in `.gitignore` — do not commit secrets.
+
+## Run
+
+**Core system (agents + router + health checks):**
+
 ```bash
 python main.py
 ```
 
-**Полный запуск (с веб-интерфейсами):**
+**REST API** (default port `8001`):
 
-**Терминал 1 - Основная система:**
-```bash
-python main.py
-```
-
-**Терминал 2 - REST API:**
 ```bash
 python web/api.py
 ```
 
-**Терминал 3 - Веб-дашборд:**
+**Dashboard** (default port `8000`):
+
 ```bash
 python web/dashboard_enhanced.py
 ```
 
-**Или используйте скрипт (Windows):**
+**Windows helper** (starts API and dashboard in separate windows, then `main.py`):
+
 ```bash
 START.bat
 ```
 
-### 4. Откройте веб-дашборд:
+## URLs
+
+| Service | URL |
+|---------|-----|
+| Dashboard | http://localhost:8000 |
+| API | http://localhost:8001 |
+| OpenAPI docs | http://localhost:8001/docs |
+
+## Project layout
 
 ```
-http://localhost:8000
+agents/          # Market, on-chain, liquidity, shitcoin, emergency, aggregator
+bot/             # Telegram, Discord, Email helpers
+core/            # DB, event router, metrics, health, WebSockets, analytics
+web/             # FastAPI API and dashboard
+tests/           # Pytest smoke tests
+main.py          # Entry point
+config.py        # Local config (create from example; gitignored)
 ```
 
-## 📊 Веб-интерфейсы
+## Tests
 
-### Веб-дашборд:
-- **Базовый:** `web/dashboard.py` → http://localhost:8000
-- **Расширенный:** `web/dashboard_enhanced.py` → http://localhost:8000
-  - Поиск и фильтры
-  - Графики сигналов
-  - Статистика по агентам
-  - Экспорт данных
-
-### REST API:
-- **API:** `web/api.py` → http://localhost:8001
-- **Документация:** http://localhost:8001/docs
-
-## 🔔 Уведомления
-
-### Telegram (встроено):
-- Настройте в `config.py`
-- Сигналы отправляются автоматически
-
-### Discord (опционально):
-```python
-from bot.discord_notifier import DiscordNotifier
-discord = DiscordNotifier(webhook_url="YOUR_WEBHOOK_URL")
-```
-
-### Email (опционально):
-```python
-from bot.email_notifier import EmailNotifier
-email = EmailNotifier(
-    smtp_server="smtp.gmail.com",
-    smtp_port=587,
-    username="your_email@gmail.com",
-    password="your_password",
-    recipients=["recipient@example.com"]
-)
-```
-
-## 📡 REST API Endpoints
-
-- `GET /api/signals` - Список сигналов с фильтрацией
-- `GET /api/signals/{id}` - Конкретный сигнал
-- `GET /api/metrics` - Метрики системы
-- `GET /api/agents/status` - Статус агентов
-- `GET /api/candles` - Свечи по символу
-- `GET /api/export/csv` - Экспорт в CSV
-- `GET /api/export/json` - Экспорт в JSON
-- `GET /api/search` - Поиск по сигналам
-- `GET /api/stats/symbols` - Статистика по символам
-
-Полная документация: http://localhost:8001/docs
-
-## 📁 Структура проекта
-
-```
-tradingBot/
-├── agents/              # Агенты анализа
-│   ├── market_agent.py
-│   ├── onchain_agent.py
-│   ├── liquidity_agent.py
-│   ├── shitcoin_agent.py
-│   ├── emergency_agent.py
-│   └── aggregator_agent.py
-├── bot/                 # Уведомления
-│   ├── telegram_bot.py
-│   ├── discord_notifier.py
-│   └── email_notifier.py
-├── core/                # Ядро системы
-│   ├── database.py
-│   ├── event_router.py
-│   ├── logger.py
-│   ├── metrics.py
-│   ├── health_check.py
-│   ├── analytics.py
-│   ├── utils.py
-│   └── rate_limiter.py
-├── web/                 # Веб-интерфейсы
-│   ├── dashboard.py
-│   ├── dashboard_enhanced.py
-│   └── api.py
-├── config.py            # Конфигурация
-├── main.py              # Точка входа
-└── requirements.txt     # Зависимости
-```
-
-## ⚙️ Конфигурация
-
-Основные настройки в `config.py`:
-
-- `telegram.bot_token` - Токен Telegram бота
-- `telegram.chat_id` - Chat ID
-- `agent.whale_threshold_usd` - Порог whale транзакций
-- `agent.min_confidence` - Минимальная уверенность (0.0-1.0)
-- `default_symbols` - Символы для отслеживания
-- `stable_coins` - Стабильные монеты (фильтруются)
-
-## 📊 База данных
-
-SQLite база данных (`crypto_analytics.db`) содержит:
-
-- `candles` - Исторические свечи
-- `signals` - Все сигналы от агентов
-- `whale_transactions` - Whale транзакции
-- `anomalies` - Аномалии рынка
-- `liquidity_zones` - Зоны ликвидности
-
-## 🔍 Мониторинг
-
-### Health Checks:
-- Автоматический мониторинг состояния агентов
-- Логирование проблем
-- Статусы: HEALTHY, DEGRADED, UNHEALTHY
-
-### Метрики:
-- Статистика по сигналам
-- Анализ по агентам, типам, символам
-- Отслеживание ошибок
-- Uptime мониторинг
-
-### Логи:
-- Структурированное логирование в `logs/`
-- Ротация логов (10MB, 5 файлов)
-- Отдельные логи для каждого модуля
-
-## 🛠️ Разработка
-
-### Запуск тестов:
 ```bash
-python test_run.py
+pytest
 ```
 
-### Проверка системы:
-```bash
-python check_system_status.py
-python check_signals.py
-```
+## Utility scripts
 
-## 📝 Документация
+| Script | Purpose |
+|--------|---------|
+| `check_system_status.py` | Dependency, config, DB, logs, ports |
+| `check_agents.py` | Agent-related DB checks |
+| `check_signals.py` | Signal statistics |
+| `test_run.py` | Dry run with mock Telegram (long-running) |
+| `setup_telegram.py` / `get_chat_id.py` | Telegram setup helpers |
 
-- `ПОЛНАЯ_ИНСТРУКЦИЯ.md` - Полная инструкция
-- `ЗАПУСК_ВСЕГО.md` - Инструкция по запуску
-- `СТАТУС_СИСТЕМЫ.md` - Статус и диагностика
+## License
 
-## 🔒 Безопасность
-
-- Не коммитьте `config.py` с реальными токенами
-- Используйте переменные окружения для чувствительных данных
-- `.gitignore` настроен для исключения конфиденциальных файлов
-
-## 📄 Лицензия
-
-MIT License
-
-## 🤝 Вклад
-
-Pull requests приветствуются! Для больших изменений сначала откройте issue для обсуждения.
-
-## 📧 Контакты
-
-GitHub: [OleksandrProtasov](https://github.com/OleksandrProtasov)
-
----
-
-**Сделано с ❤️ для крипто-трейдеров**
+Use at your own risk. Not financial advice.

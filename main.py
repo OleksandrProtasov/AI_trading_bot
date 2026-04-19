@@ -1,120 +1,100 @@
 """
-main.py - точка входа, запускает всех агентов и Telegram-бот
+Entry point: starts all agents, event router, health checks, and optional Telegram.
 """
 import asyncio
-import os
-import sys
-from core.database import Database
-from core.event_router import EventRouter
-from core.logger import setup_logger
-from core.metrics import Metrics
-from core.health_check import HealthCheck
 import signal
 import sys
+
+from agents.aggregator_agent import AggregatorAgent
+from agents.emergency_agent import EmergencyAgent
+from agents.liquidity_agent import LiquidityAgent
 from agents.market_agent import MarketAgent
 from agents.onchain_agent import OnChainAgent
-from agents.liquidity_agent import LiquidityAgent
 from agents.shitcoin_agent import ShitcoinAgent
-from agents.emergency_agent import EmergencyAgent
-from agents.aggregator_agent import AggregatorAgent
 from bot.telegram_bot import TelegramBot
 from config import config
+from core.database import Database
+from core.event_router import EventRouter
+from core.health_check import HealthCheck
+from core.logger import setup_logger
+from core.metrics import Metrics
 
-# Настройка логирования
 logger = setup_logger(__name__, config.log_dir)
 
 
 async def main():
-    """Главная функция запуска системы"""
+    """Run the multi-agent analytics system."""
     logger.info("=" * 60)
-    logger.info("🚀 Запуск мультиагентной крипто-аналитической системы")
+    logger.info("Starting multi-agent crypto analytics system")
     logger.info("=" * 60)
-    
-    # Валидация конфигурации
+
     if not config.validate():
-        logger.error("Ошибки в конфигурации. Исправьте и перезапустите.")
+        logger.error("Configuration invalid. Fix errors and restart.")
         sys.exit(1)
-    
-    logger.info(f"Конфигурация загружена: {len(config.default_symbols)} символов")
-    
-    # Инициализация базы данных
-    logger.info("📦 Инициализация базы данных...")
+
+    logger.info("Loaded config: %s symbols", len(config.default_symbols))
+
+    logger.info("Initializing database...")
     db = Database(config.database.db_path)
-    
-    # Инициализация метрик
+
     metrics = Metrics(db)
-    
-    # Инициализация health checks
     health_check = HealthCheck()
-    
-    # Инициализация Telegram бота
-    logger.info("🤖 Инициализация Telegram бота...")
+
+    logger.info("Initializing Telegram...")
     telegram_bot = None
     if config.telegram.bot_token and config.telegram.chat_id:
         try:
-            telegram_bot = TelegramBot(config.telegram.bot_token, config.telegram.chat_id)
-            await telegram_bot.send_daily_report("Система запущена и готова к работе! 🚀")
-            logger.info("✅ Telegram бот инициализирован")
+            telegram_bot = TelegramBot(
+                config.telegram.bot_token, config.telegram.chat_id
+            )
+            await telegram_bot.send_daily_report(
+                "System is up and running."
+            )
+            logger.info("Telegram bot ready")
         except Exception as e:
-            logger.error(f"Ошибка инициализации Telegram бота: {e}", exc_info=True)
+            logger.error("Telegram init failed: %s", e, exc_info=True)
             telegram_bot = None
     else:
-        logger.warning("Telegram бот не инициализирован (нет токена/chat_id)")
-    
-    # Инициализация Aggregator Agent
-    logger.info("🎯 Инициализация Aggregator Agent...")
+        logger.warning("Telegram disabled (missing token or chat id)")
+
+    logger.info("Initializing Aggregator...")
     aggregator_agent = AggregatorAgent(db, None, telegram_bot)
-    
-    # Инициализация Event Router с callback для AggregatorAgent
-    logger.info("🔄 Инициализация Event Router...")
-    async def aggregator_callback(signal):
-        await aggregator_agent.add_signal(signal)
+
+    logger.info("Initializing EventRouter...")
+
+    async def aggregator_callback(sig):
+        await aggregator_agent.add_signal(sig)
+
     event_router = EventRouter(db, None, aggregator_callback)
-    
     aggregator_agent.event_router = event_router
-    
-    # Инициализация агентов
-    logger.info("🤖 Инициализация агентов...")
-    
-    logger.info("  📈 Market Agent...")
+
+    logger.info("Initializing agents...")
     market_agent = MarketAgent(db, event_router, config.default_symbols)
-    
-    logger.info("  🐋 OnChain Agent...")
     onchain_agent = OnChainAgent(db, event_router, config.default_symbols)
-    
-    logger.info("  💧 Liquidity Agent...")
     liquidity_agent = LiquidityAgent(db, event_router, market_agent)
-    
-    logger.info("  💩 Shitcoin Agent...")
     shitcoin_agent = ShitcoinAgent(db, event_router)
-    
-    logger.info("  🚨 Emergency Agent...")
-    emergency_agent = EmergencyAgent(db, event_router, market_agent, liquidity_agent)
-    
-    logger.info("✅ Все агенты инициализированы")
-    
-    # Регистрация агентов для мониторинга
+    emergency_agent = EmergencyAgent(
+        db, event_router, market_agent, liquidity_agent
+    )
+
+    logger.info("All agents initialized")
+
     health_check.register_agent("market", market_agent)
     health_check.register_agent("onchain", onchain_agent)
     health_check.register_agent("liquidity", liquidity_agent)
     health_check.register_agent("shitcoin", shitcoin_agent)
     health_check.register_agent("emergency", emergency_agent)
     health_check.register_agent("aggregator", aggregator_agent)
-    
-    # Запуск Event Router
-    logger.info("🔄 Запуск Event Router...")
+
+    logger.info("Starting EventRouter...")
     router_task = asyncio.create_task(event_router.process_signals())
-    
-    # Запуск health check мониторинга
     health_task = asyncio.create_task(health_check.monitor())
-    
-    # Запуск всех агентов
-    logger.info("🚀 Запуск агентов...")
+
+    logger.info("Starting agents...")
     logger.info("=" * 60)
-    
-    # Обработка сигналов для graceful shutdown
-    def signal_handler(signum, frame):
-        logger.info(f"Получен сигнал {signum}, инициируем graceful shutdown...")
+
+    def signal_handler(signum, _frame):
+        logger.info("Signal %s received, shutting down...", signum)
         market_agent.running = False
         onchain_agent.running = False
         liquidity_agent.running = False
@@ -122,10 +102,10 @@ async def main():
         emergency_agent.running = False
         aggregator_agent.running = False
         event_router.running = False
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     try:
         await asyncio.gather(
             market_agent.start(),
@@ -136,16 +116,15 @@ async def main():
             aggregator_agent.start(),
             router_task,
             health_task,
-            return_exceptions=True
+            return_exceptions=True,
         )
     except KeyboardInterrupt:
-        logger.info("⚠️  Получен сигнал остановки...")
+        logger.info("Stop requested")
     except Exception as e:
-        logger.critical(f"Критическая ошибка: {e}", exc_info=True)
+        logger.critical("Fatal error: %s", e, exc_info=True)
     finally:
-        # Остановка всех компонентов
-        logger.info("🛑 Остановка системы...")
-        
+        logger.info("Stopping system...")
+
         market_agent.running = False
         onchain_agent.running = False
         liquidity_agent.running = False
@@ -153,39 +132,37 @@ async def main():
         emergency_agent.running = False
         aggregator_agent.running = False
         event_router.running = False
-        
-        # Graceful shutdown WebSocket соединений
-        if hasattr(market_agent, 'websocket') and market_agent.websocket:
+
+        if hasattr(market_agent, "websocket") and market_agent.websocket:
             try:
                 await market_agent.websocket.close()
-            except:
+            except Exception:
                 pass
-        
-        # Финальный health check
-        final_status = await health_check.check_health()
-        logger.info(f"Финальный статус агентов:\n{health_check.get_status_summary()}")
-        
+
+        await health_check.check_health()
+        logger.info("Final agent status:\n%s", health_check.get_status_summary())
+
         await asyncio.sleep(2)
-        
-        # Финальная статистика
+
         stats = await metrics.get_statistics(24)
-        logger.info(f"Статистика за 24 часа: {stats.get('total_signals', 0)} сигналов")
-        
+        logger.info(
+            "Signals (24h window): %s", stats.get("total_signals", 0)
+        )
+
         if telegram_bot:
             try:
-                await telegram_bot.send_daily_report("Система остановлена. 👋")
-            except:
+                await telegram_bot.send_daily_report("System stopped.")
+            except Exception:
                 pass
-        
-        logger.info("✅ Система остановлена")
+
+        logger.info("Shutdown complete")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 До свидания!")
+        logger.info("Goodbye")
     except Exception as e:
-        logger.critical(f"Ошибка запуска: {e}", exc_info=True)
+        logger.critical("Startup error: %s", e, exc_info=True)
         sys.exit(1)
-

@@ -143,3 +143,6 @@ class DiscordNotifier:
         except Exception as e:
             self.logger.error(f"Ошибка отправки агрегированного сигнала в Discord: {e}", exc_info=True)
 
+
+
+

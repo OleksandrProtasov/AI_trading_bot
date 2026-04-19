@@ -1,6 +1,4 @@
-"""
-liquidity_agent.py - анализ зон ликвидности и стоп-кластеров
-"""
+"""Order-book liquidity zones, imbalance, and stop-cluster heuristics."""
 import asyncio
 from typing import Dict, List, Optional
 from datetime import datetime
@@ -14,7 +12,7 @@ class LiquidityAgent:
     def __init__(self, db: Database, event_router: EventRouter, market_agent):
         self.db = db
         self.event_router = event_router
-        self.market_agent = market_agent  # Для доступа к order_books
+        self.market_agent = market_agent
         self.running = False
         self.logger = get_logger(__name__)
     
@@ -65,7 +63,9 @@ class LiquidityAgent:
                             agent_type="liquidity",
                             signal_type="orderbook_imbalance",
                             priority=Priority.MEDIUM,
-                            message=f"Имбаланс стакана на {symbol}: {imbalance:.2%} ({direction})",
+                            message=(
+                                f"Book imbalance on {symbol}: {imbalance:.2%} ({direction})"
+                            ),
                             symbol=symbol,
                             data={
                                 'imbalance': imbalance,
@@ -82,7 +82,9 @@ class LiquidityAgent:
                                 agent_type="liquidity",
                                 signal_type="stop_cluster",
                                 priority=Priority.HIGH,
-                                message=f"Стоп-кластер на {symbol} на уровне {cluster['price']:.4f}",
+                                message=(
+                                    f"Stop cluster on {symbol} near {cluster['price']:.4f}"
+                                ),
                                 symbol=symbol,
                                 data={
                                     'price': cluster['price'],
@@ -93,7 +95,7 @@ class LiquidityAgent:
                             await self.event_router.add_signal(signal)
                             
             except Exception as e:
-                self.logger.error(f"Ошибка анализа: {e}", exc_info=True)
+                self.logger.error("Liquidity analysis error: %s", e, exc_info=True)
                 await asyncio.sleep(10)
     
     def _find_liquidity_zones(self, bids: List, asks: List) -> List[Dict]:
