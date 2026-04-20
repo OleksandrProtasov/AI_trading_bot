@@ -1,4 +1,6 @@
 """Enhanced FastAPI dashboard: filters, charts, WebSocket refresh."""
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,8 +19,6 @@ from core.health_check import HealthCheck
 from core.metrics import Metrics
 from core.analytics import Analytics
 
-app = FastAPI(title="Crypto Analytics Dashboard Enhanced")
-
 # process-level singletons (dashboard process only)
 db: Database = None
 health_check: HealthCheck = None
@@ -27,14 +27,20 @@ analytics: Analytics = None
 active_connections: List[WebSocket] = []
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Wire DB + metrics on startup."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global db, health_check, metrics, analytics
     db = Database("crypto_analytics.db")
     health_check = HealthCheck()
     metrics = Metrics(db)
     analytics = Analytics(db)
+    yield
+
+
+app = FastAPI(
+    title="Crypto Analytics Dashboard Enhanced",
+    lifespan=lifespan,
+)
 
 
 @app.get("/", response_class=HTMLResponse)

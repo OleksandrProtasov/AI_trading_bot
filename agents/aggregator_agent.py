@@ -9,6 +9,7 @@ from core.event_router import EventRouter, Signal, Priority
 from core.logger import get_logger
 from core.utils import is_stable_coin, validate_price
 from core.metrics import Metrics
+from core.expert_council import refine_aggregate
 from config import config
 
 
@@ -287,7 +288,21 @@ class AggregatorAgent:
                 tp=tp
             )
             aggregated.source_signals = signals
-            
+
+            if getattr(config.agent, "expert_council_enabled", True):
+                refine_aggregate(
+                    aggregated,
+                    signals,
+                    self.logger,
+                    enabled=True,
+                    disagreement_threshold=getattr(
+                        config.agent, "expert_council_disagreement_threshold", 0.45
+                    ),
+                    disagreement_penalty=getattr(
+                        config.agent, "expert_council_disagreement_penalty", 0.35
+                    ),
+                )
+
             return aggregated
             
         except Exception as e:

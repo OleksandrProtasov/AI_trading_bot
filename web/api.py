@@ -1,4 +1,6 @@
 """FastAPI REST surface for signals, metrics, export, and search."""
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from typing import Optional, List
@@ -16,20 +18,22 @@ from core.database import Database
 from core.metrics import Metrics
 from core.health_check import HealthCheck
 
-app = FastAPI(title="Crypto Analytics API", version="1.0.0")
-
 # module singletons
 db: Database = None
 metrics: Metrics = None
 health_check: HealthCheck = None
 
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global db, metrics, health_check
     db = Database("crypto_analytics.db")
     metrics = Metrics(db)
     health_check = HealthCheck()
+    yield
+
+
+app = FastAPI(title="Crypto Analytics API", version="1.0.0", lifespan=lifespan)
 
 
 # --- Signals ---

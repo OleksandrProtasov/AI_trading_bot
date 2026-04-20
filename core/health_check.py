@@ -1,6 +1,4 @@
-"""
-health_check.py - система проверки здоровья агентов
-"""
+"""Lightweight agent liveness tracking (best-effort, not a full APM)."""
 import asyncio
 from typing import Dict, Optional
 from datetime import datetime, timedelta
@@ -16,117 +14,107 @@ class HealthStatus(Enum):
 
 
 class HealthCheck:
-    """Система мониторинга здоровья компонентов"""
-    
     def __init__(self):
         self.logger = get_logger(__name__)
         self.agents_status: Dict[str, Dict] = {}
         self.last_check = {}
-        self.check_interval = 30  # Проверка каждые 30 секунд
-        self.max_silence_time = 120  # Максимальное время молчания (секунды)
-    
+        self.check_interval = 30
+        self.max_silence_time = 120
+
     def register_agent(self, agent_name: str, agent_instance):
-        """Регистрация агента для мониторинга"""
+        now = datetime.utcnow()
         self.agents_status[agent_name] = {
-            'instance': agent_instance,
-            'status': HealthStatus.UNKNOWN,
-            'last_activity': None,
-            'last_signal_time': None,
-            'error_count': 0,
-            'last_error': None
+            "instance": agent_instance,
+            "status": HealthStatus.HEALTHY,
+            "last_activity": now,
+            "last_signal_time": None,
+            "error_count": 0,
+            "last_error": None,
         }
-        self.logger.info(f"Зарегистрирован агент для мониторинга: {agent_name}")
+        self.logger.info("HealthCheck registered agent: %s", agent_name)
     
     def update_activity(self, agent_name: str):
-        """Обновление активности агента"""
         if agent_name in self.agents_status:
-            self.agents_status[agent_name]['last_activity'] = datetime.utcnow()
-            self.agents_status[agent_name]['status'] = HealthStatus.HEALTHY
-    
+            self.agents_status[agent_name]["last_activity"] = datetime.utcnow()
+            self.agents_status[agent_name]["status"] = HealthStatus.HEALTHY
+
     def update_signal(self, agent_name: str):
-        """Обновление времени последнего сигнала"""
         if agent_name in self.agents_status:
-            self.agents_status[agent_name]['last_signal_time'] = datetime.utcnow()
+            self.agents_status[agent_name]["last_signal_time"] = datetime.utcnow()
             self.update_activity(agent_name)
-    
+
     def record_error(self, agent_name: str, error: Exception):
-        """Запись ошибки агента"""
         if agent_name in self.agents_status:
-            self.agents_status[agent_name]['error_count'] += 1
-            self.agents_status[agent_name]['last_error'] = {
-                'message': str(error),
-                'time': datetime.utcnow()
+            self.agents_status[agent_name]["error_count"] += 1
+            self.agents_status[agent_name]["last_error"] = {
+                "message": str(error),
+                "time": datetime.utcnow(),
             }
-            # Если много ошибок - помечаем как unhealthy
-            if self.agents_status[agent_name]['error_count'] > 10:
-                self.agents_status[agent_name]['status'] = HealthStatus.UNHEALTHY
-    
+            if self.agents_status[agent_name]["error_count"] > 10:
+                self.agents_status[agent_name]["status"] = HealthStatus.UNHEALTHY
+
     async def check_health(self) -> Dict[str, HealthStatus]:
-        """Проверка здоровья всех агентов"""
         results = {}
         now = datetime.utcnow()
-        
+
         for agent_name, info in self.agents_status.items():
             status = HealthStatus.UNKNOWN
-            
-            # Проверяем, запущен ли агент
-            if hasattr(info['instance'], 'running'):
-                if not info['instance'].running:
+
+            if hasattr(info["instance"], "running"):
+                if not info["instance"].running:
                     status = HealthStatus.UNHEALTHY
                 else:
-                    # Проверяем последнюю активность
-                    if info['last_activity']:
-                        silence_time = (now - info['last_activity']).total_seconds()
+                    last = info["last_activity"]
+                    if last is None:
+                        status = HealthStatus.HEALTHY
+                    else:
+                        silence_time = (now - last).total_seconds()
                         if silence_time > self.max_silence_time:
                             status = HealthStatus.DEGRADED
                         else:
                             status = HealthStatus.HEALTHY
-                    else:
-                        status = HealthStatus.UNKNOWN
-            
-            # Учитываем количество ошибок
-            if info['error_count'] > 5:
+
+            if info["error_count"] > 5:
                 status = HealthStatus.DEGRADED
-            if info['error_count'] > 10:
+            if info["error_count"] > 10:
                 status = HealthStatus.UNHEALTHY
-            
-            info['status'] = status
+
+            info["status"] = status
             results[agent_name] = status
             self.last_check[agent_name] = now
-        
+
         return results
-    
+
     async def monitor(self):
-        """Непрерывный мониторинг"""
         while True:
             try:
                 await self.check_health()
-                
-                # Логируем статусы
+
                 for agent_name, info in self.agents_status.items():
-                    if info['status'] != HealthStatus.HEALTHY:
+                    if info["status"] != HealthStatus.HEALTHY:
                         self.logger.warning(
-                            f"Агент {agent_name}: {info['status'].value} "
-                            f"(ошибок: {info['error_count']}, "
-                            f"последняя активность: {info['last_activity']})"
+                            "Agent %s: %s (errors=%s last_activity=%s)",
+                            agent_name,
+                            info["status"].value,
+                            info["error_count"],
+                            info["last_activity"],
                         )
-                
+
                 await asyncio.sleep(self.check_interval)
             except Exception as e:
-                self.logger.error(f"Ошибка мониторинга: {e}", exc_info=True)
+                self.logger.error("Health monitor error: %s", e, exc_info=True)
                 await asyncio.sleep(self.check_interval)
-    
+
     def get_status_summary(self) -> str:
-        """Получение сводки статусов"""
         summary = []
         for agent_name, info in self.agents_status.items():
             status_emoji = {
                 HealthStatus.HEALTHY: "✅",
                 HealthStatus.DEGRADED: "⚠️",
                 HealthStatus.UNHEALTHY: "❌",
-                HealthStatus.UNKNOWN: "❓"
+                HealthStatus.UNKNOWN: "❓",
             }
-            emoji = status_emoji.get(info['status'], "❓")
+            emoji = status_emoji.get(info["status"], "❓")
             summary.append(f"{emoji} {agent_name}: {info['status'].value}")
         return "\n".join(summary)
 

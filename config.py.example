@@ -32,6 +32,10 @@ class AgentConfig:
     max_signals_per_symbol: int = 50
     signal_deduplication_window: int = 60
     recent_signals_window: int = 60
+    # Rule-based "expert council" on top of aggregator scores (extensible to ML)
+    expert_council_enabled: bool = True
+    expert_council_disagreement_threshold: float = 0.45
+    expert_council_disagreement_penalty: float = 0.35
 
 
 @dataclass
