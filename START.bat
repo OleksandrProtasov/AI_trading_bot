@@ -1,6 +1,7 @@
 @echo off
 chcp 65001 >nul
-title Crypto Analytics System
+set PYTHONUNBUFFERED=1
+title MAIN BOT - logs in this window
 color 0A
 
 echo.
@@ -45,31 +46,36 @@ if exist "config.py" (
 echo.
 echo [4/4] Starting services...
 echo.
-echo   Main app runs in this window. API and dashboard start separately.
+echo   Main bot logs INFO to this window (see also logs\ folder).
+echo   API + Dashboard open in separate windows — keep them open.
 echo ============================================================
 echo.
 
 timeout /t 2 >nul
 
-echo Starting REST API on port 8001...
-start "Crypto Analytics - REST API" cmd /k "cd /d %~dp0 && python web/api.py"
+echo Starting REST API on port 8001 ^(new window^)...
+start "REST API :8001" cmd /k "cd /d %~dp0 && set PYTHONUNBUFFERED=1 && title REST API :8001 && color 0B && python -u web/api.py"
 
 timeout /t 1 >nul
 
-echo Starting dashboard on port 8000...
-start "Crypto Analytics - Dashboard" cmd /k "cd /d %~dp0 && python web/dashboard_enhanced.py"
+echo Starting dashboard on port 8000 ^(new window^)...
+start "Dashboard :8000" cmd /k "cd /d %~dp0 && set PYTHONUNBUFFERED=1 && title Dashboard :8000 && color 0E && python -u web/dashboard_enhanced.py"
 
 timeout /t 1 >nul
 
 echo.
-echo   Dashboard: http://localhost:8000
-echo   API:       http://localhost:8001
-echo   Docs:      http://localhost:8001/docs
+echo   Dashboard: http://127.0.0.1:8000
+echo   API:       http://127.0.0.1:8001
+echo   Docs:      http://127.0.0.1:8001/docs
 echo.
-echo   Press Ctrl+C in this window to stop the main process.
+echo   If the site does not open: wait 2-3 sec, check firewall, try 127.0.0.1
+echo   THIS WINDOW = main bot ^(agents, Telegram, aggregation^).
+echo   Every ~60s: one INFO line with signal/candle counts ^(see config activity_log_interval_sec^).
+echo   Anytime snapshot:  python bot_activity.py
+echo   Press Ctrl+C here to stop the bot. Close other windows to stop web.
 echo ============================================================
 echo.
 
-python main.py
+python -u main.py
 
 pause

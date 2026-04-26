@@ -20,7 +20,7 @@ class MarketAgent:
         self.symbols = []
         for s in symbols:
             try:
-                validated = validate_symbol(s).lower()
+                validated = validate_symbol(s).upper()
                 self.symbols.append(validated)
             except ValueError:
                 continue
@@ -34,16 +34,49 @@ class MarketAgent:
     async def start(self):
         """Start concurrent WS and analysis loops."""
         self.running = True
+        await self._warmup_candles()
         await asyncio.gather(
             self._listen_klines(),
             self._listen_orderbook(),
             self._listen_trades(),
             self._analyze_market()
         )
+
+    async def _warmup_candles(self):
+        """
+        Preload recent 1m candles from DB so analytics can start immediately
+        after restart (instead of waiting ~20 minutes for buffer fill).
+        """
+        try:
+            loaded = 0
+            for symbol in self.symbols:
+                rows = await self.db.get_recent_candles(symbol, "1m", limit=120)
+                if not rows:
+                    continue
+                rows = sorted(rows, key=lambda x: x.get("timestamp", 0))
+                self.candle_data[symbol] = [
+                    {
+                        "timestamp": int(r["timestamp"]),
+                        "open": float(r["open"]),
+                        "high": float(r["high"]),
+                        "low": float(r["low"]),
+                        "close": float(r["close"]),
+                        "volume": float(r["volume"]),
+                    }
+                    for r in rows[-100:]
+                ]
+                loaded += len(self.candle_data[symbol])
+            self.logger.info(
+                "Warmup loaded %s candle rows for %s symbols",
+                loaded,
+                len(self.candle_data),
+            )
+        except Exception as e:
+            self.logger.error("Warmup failed: %s", e, exc_info=True)
     
     async def _listen_klines(self):
         """Stream kline/candle updates."""
-        streams = [f"{symbol}@kline_1m" for symbol in self.symbols]
+        streams = [f"{symbol.lower()}@kline_1m" for symbol in self.symbols]
         stream_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
         
         while self.running:
@@ -125,7 +158,7 @@ class MarketAgent:
     
     async def _listen_orderbook_chunk(self, symbols_chunk: List[str]):
         """Depth stream for one symbol chunk."""
-        streams = [f"{symbol}@depth20@100ms" for symbol in symbols_chunk]
+        streams = [f"{symbol.lower()}@depth20@100ms" for symbol in symbols_chunk]
         stream_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
         
         while self.running:
@@ -220,7 +253,7 @@ class MarketAgent:
     
     async def _listen_trades(self):
         """Agg-trade stream."""
-        streams = [f"{symbol}@trade" for symbol in self.symbols]
+        streams = [f"{symbol.lower()}@trade" for symbol in self.symbols]
         stream_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
         
         while self.running:
@@ -307,7 +340,10 @@ class MarketAgent:
                     resistance = df['high'].tail(20).max()
                     
                     # emit signals
-                    if volume_spike > 2.0 and trend == "BULLISH":
+                    if (
+                        volume_spike > config.agent.volume_spike_threshold
+                        and trend == "BULLISH"
+                    ):
                         signal = Signal(
                             agent_type="market",
                             signal_type="volume_spike",
@@ -328,7 +364,7 @@ class MarketAgent:
                         )
                         await self.event_router.add_signal(signal)
                     
-                    if volatility > 0.05:
+                    if volatility > config.agent.price_change_threshold:
                         signal = Signal(
                             agent_type="market",
                             signal_type="high_volatility",

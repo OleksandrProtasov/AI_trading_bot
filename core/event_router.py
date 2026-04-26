@@ -2,6 +2,7 @@
 import asyncio
 from datetime import datetime
 from enum import Enum
+import time
 from typing import Dict, Optional
 
 from core.database import Database
@@ -43,13 +44,26 @@ class Signal:
 
 
 class EventRouter:
-    def __init__(self, db: Database, telegram_handler=None, aggregator_callback=None):
+    def __init__(
+        self,
+        db: Database,
+        telegram_handler=None,
+        aggregator_callback=None,
+        *,
+        forward_all_raw_to_telegram: bool = True,
+    ):
         self.db = db
         self.telegram_handler = telegram_handler
         self.aggregator_callback = aggregator_callback
+        self.forward_all_raw_to_telegram = forward_all_raw_to_telegram
         self.signal_queue = asyncio.Queue()
         self.running = False
         self.logger = get_logger(__name__)
+        # Telegram anti-flood (keeps chat readable and avoids API rate limits).
+        self.telegram_global_min_interval_sec = 2.0
+        self.telegram_same_signal_cooldown_sec = 120.0
+        self._telegram_last_global_sent_at = 0.0
+        self._telegram_last_by_key: Dict[str, float] = {}
         self.priority_weights = {
             Priority.CRITICAL: 5,
             Priority.URGENT: 4,
@@ -89,7 +103,7 @@ class EventRouter:
 
                 if self.telegram_handler:
                     should_send = await self._should_send_to_telegram(signal)
-                    if should_send:
+                    if should_send and self._can_send_telegram(signal):
                         await self.telegram_handler.send_signal(signal)
                         if signal_id:
                             await self.db.mark_signal_sent(signal_id)
@@ -100,17 +114,37 @@ class EventRouter:
                 self.logger.error("Signal processing error: %s", e, exc_info=True)
 
     async def _should_send_to_telegram(self, signal: Signal) -> bool:
-        """Legacy direct-to-Telegram path (aggregator usually owns alerts)."""
+        """Telegram path for per-agent raw signals (aggregator sends separately)."""
+        if signal.agent_type == "aggregator":
+            return False
+        if self.forward_all_raw_to_telegram:
+            return True
+        # strict mode: only the most actionable/high-risk events
         if signal.priority in [Priority.CRITICAL, Priority.URGENT]:
-            return True
-        if signal.agent_type == "emergency":
-            return True
-        if signal.priority == Priority.HIGH:
             return True
         important_types = ["buy", "sell", "exit", "whale_alert", "liquidity_break"]
         if signal.signal_type in important_types:
             return True
         return False
+
+    def _can_send_telegram(self, signal: Signal) -> bool:
+        """
+        Apply anti-flood gates:
+        - global minimum interval between telegram messages
+        - cooldown for same (agent, type, symbol)
+        """
+        now = time.time()
+        if now - self._telegram_last_global_sent_at < self.telegram_global_min_interval_sec:
+            return False
+
+        key = f"{signal.agent_type}:{signal.signal_type}:{signal.symbol or '-'}"
+        last = self._telegram_last_by_key.get(key, 0.0)
+        if now - last < self.telegram_same_signal_cooldown_sec:
+            return False
+
+        self._telegram_last_global_sent_at = now
+        self._telegram_last_by_key[key] = now
+        return True
 
     def format_signal_message(self, signal: Signal) -> str:
         """HTML formatting helper (used by legacy paths)."""

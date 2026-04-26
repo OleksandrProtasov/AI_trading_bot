@@ -1,5 +1,6 @@
 """Aggregator agent: merges signals from all agents into weighted actions."""
 import asyncio
+from calendar import timegm
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from enum import Enum
@@ -42,7 +43,8 @@ class AggregatedSignal:
         self.tp = tp
         self.timestamp = datetime.utcnow()
         self.source_signals = []  # contributing raw signals
-    
+        self.baseline_action: Optional[str] = None  # set before expert council
+
     def __repr__(self):
         return f"AggregatedSignal({self.symbol}, {self.action.value}, {self.confidence:.2%})"
 
@@ -55,6 +57,12 @@ class AggregatorAgent:
         self.running = False
         self.logger = get_logger(__name__)
         self.metrics = Metrics(db)
+        self.logger.info(
+            "Aggregator strategy mode=%s (min_conf=%.2f confirms=%s)",
+            getattr(config.agent, "strategy_mode", "balanced"),
+            float(getattr(config.agent, "strategy_min_confidence", 0.55)),
+            int(getattr(config.agent, "strategy_required_confirmations", 2)),
+        )
         
         self.signals_by_symbol = defaultdict(list)
         self.last_sent_signals = {}
@@ -99,6 +107,132 @@ class AggregatorAgent:
         }
         
         self.signal_queue = asyncio.Queue()
+
+    def _signal_confidence(self, signal: Signal) -> float:
+        """Best-effort per-signal confidence used by score aggregator."""
+        data_conf = None
+        if signal.data:
+            try:
+                data_conf = float(signal.data.get("confidence"))
+            except (TypeError, ValueError):
+                data_conf = None
+        if data_conf is not None:
+            return max(0.0, min(1.0, data_conf))
+        return float(self.priority_weights.get(signal.priority, 0.5))
+
+    def _classify_signal(self, signal: Signal) -> str:
+        """
+        Conservative signal side classifier.
+        Returns: buy | sell | exit | neutral
+        """
+        st = (signal.signal_type or "").lower()
+        data = signal.data or {}
+        msg = (signal.message or "").lower()
+
+        if any(k in st for k in ("liquidity_crisis", "dump_danger", "rapid_dump")):
+            return "exit"
+        if any(k in st for k in ("exit", "danger", "crisis")):
+            return "exit"
+        if any(k in st for k in ("support_break", "sell", "dump")):
+            return "sell"
+        if any(k in st for k in ("resistance_break", "pump", "buy", "whale_activity")):
+            return "buy"
+
+        if "imbalance" in st:
+            try:
+                imbalance = float(data.get("imbalance", 0.0))
+                if imbalance > 0:
+                    return "buy"
+                if imbalance < 0:
+                    return "sell"
+            except (TypeError, ValueError):
+                pass
+
+        if any(k in st for k in ("volume_spike", "price_spike", "high_volatility")):
+            if any(k in msg for k in ("dump", "sell", "down", "bear")):
+                return "sell"
+            if any(k in msg for k in ("pump", "buy", "up", "bull")):
+                return "buy"
+            return "neutral"
+
+        return "neutral"
+
+    def _apply_strategy_mode(
+        self,
+        action: Action,
+        confidence: float,
+        buy_signals: List[Signal],
+        sell_signals: List[Signal],
+        exit_signals: List[Signal],
+        reasons: List[str],
+    ) -> tuple[Action, float, List[str]]:
+        """
+        Strategy layer on top of raw weighted scores.
+        - balanced: default behavior
+        - trend_following: require market confirmation for BUY/SELL
+        - defensive: strongly prefer WAIT unless broad confirmation
+        """
+        mode = getattr(config.agent, "strategy_mode", "balanced").lower()
+        min_conf = float(getattr(config.agent, "strategy_min_confidence", 0.55))
+        req_confirms = int(getattr(config.agent, "strategy_required_confirmations", 2))
+
+        def _agent_count(items: List[Signal]) -> int:
+            return len({s.agent_type for s in items})
+
+        buy_confirms = _agent_count(buy_signals)
+        sell_confirms = _agent_count(sell_signals)
+        has_market_buy = any(s.agent_type == "market" for s in buy_signals)
+        has_market_sell = any(s.agent_type == "market" for s in sell_signals)
+        heavy_exit = len(exit_signals) >= max(2, req_confirms)
+        bearish_guard_on = bool(
+            getattr(config.agent, "strategy_bearish_guard_enabled", True)
+        )
+        bearish_threshold = int(
+            getattr(config.agent, "strategy_bearish_guard_threshold", 2)
+        )
+        bearish_pressure = 0
+        for s in exit_signals + sell_signals:
+            st = (s.signal_type or "").lower()
+            if any(k in st for k in ("dump", "danger", "crisis", "sell", "support_break")):
+                bearish_pressure += 1
+            if s.agent_type == "emergency":
+                bearish_pressure += 1
+
+        if bearish_guard_on and action == Action.BUY and bearish_pressure >= bearish_threshold:
+            if bearish_pressure >= bearish_threshold + 2:
+                return Action.EXIT, min(confidence, 0.55), reasons + [
+                    f"Bearish guard: high sell pressure ({bearish_pressure})."
+                ]
+            return Action.WAIT, min(confidence, 0.40), reasons + [
+                f"Bearish guard: buy blocked ({bearish_pressure})."
+            ]
+
+        if mode == "trend_following":
+            if action == Action.BUY:
+                if confidence < min_conf or buy_confirms < req_confirms or not has_market_buy:
+                    return Action.WAIT, min(confidence, 0.45), reasons + [
+                        "Trend mode: buy blocked (weak confirmation)."
+                    ]
+            if action == Action.SELL:
+                if confidence < min_conf or sell_confirms < req_confirms or not has_market_sell:
+                    return Action.WAIT, min(confidence, 0.45), reasons + [
+                        "Trend mode: sell blocked (weak confirmation)."
+                    ]
+
+        elif mode == "defensive":
+            if action in (Action.BUY, Action.SELL):
+                confirms = buy_confirms if action == Action.BUY else sell_confirms
+                if confidence < (min_conf + 0.05) or confirms < (req_confirms + 1):
+                    return Action.WAIT, min(confidence, 0.40), reasons + [
+                        "Defensive mode: waiting for stronger multi-agent confluence."
+                    ]
+            if action == Action.BUY and heavy_exit:
+                return Action.WAIT, min(confidence, 0.35), reasons + [
+                    "Defensive mode: elevated exit pressure detected."
+                ]
+
+        # balanced or unknown
+        return action, confidence, reasons
 
     async def start(self):
         """Start background aggregation tasks."""
@@ -177,16 +311,24 @@ class AggregatorAgent:
                             )
                             continue
 
+                        sent_telegram = False
                         if self.telegram_bot:
                             await self._send_aggregated_signal(aggregated)
-                            self.last_sent_signals[signal_key] = datetime.utcnow().timestamp()
+                            sent_telegram = True
                             self.metrics.record_signal(
                                 "aggregator",
                                 aggregated.action.value.lower(),
                                 symbol,
                             )
 
-                        await self._save_aggregated_signal(aggregated)
+                        self.last_sent_signals[signal_key] = (
+                            datetime.utcnow().timestamp()
+                        )
+
+                        await self._save_aggregated_signal(
+                            aggregated,
+                            sent_telegram=sent_telegram,
+                        )
 
             except Exception as e:
                 self.logger.error("Aggregation error: %s", e, exc_info=True)
@@ -201,26 +343,32 @@ class AggregatorAgent:
             exit_signals = []
 
             for signal in signals:
-                signal_type = signal.signal_type.lower()
-                if any(x in signal_type for x in ['pump', 'break', 'buy', 'whale_activity', 'imbalance']):
-                    if 'dump' not in signal_type and 'exit' not in signal_type:
-                        buy_signals.append(signal)
-                
-                if any(x in signal_type for x in ['dump', 'sell', 'exit', 'danger', 'crisis']):
-                    exit_signals.append(signal)
-                
-                if 'sell' in signal_type or ('dump' in signal_type and 'rapid' in signal_type):
+                cls = self._classify_signal(signal)
+                if cls == "buy":
+                    buy_signals.append(signal)
+                elif cls == "sell":
                     sell_signals.append(signal)
+                    if signal.agent_type == "emergency":
+                        exit_signals.append(signal)
+                elif cls == "exit":
+                    exit_signals.append(signal)
             
             buy_score = self._calculate_score(buy_signals)
             sell_score = self._calculate_score(sell_signals)
             exit_score = self._calculate_score(exit_signals)
 
             max_score = max(buy_score, sell_score, exit_score)
+            sorted_scores = sorted([buy_score, sell_score, exit_score], reverse=True)
+            score_margin = sorted_scores[0] - sorted_scores[1]
+            min_margin = 0.10
 
             if max_score < 0.3:
                 return None
-            if exit_score >= max_score * 0.9:
+            if score_margin < min_margin:
+                action = Action.WAIT
+                confidence = max_score
+                reasons = ["Low directional edge: conflicting signal groups."]
+            elif exit_score >= max_score * 0.9:
                 action = Action.EXIT
                 confidence = exit_score
                 reasons = self._extract_reasons(exit_signals)
@@ -236,6 +384,15 @@ class AggregatorAgent:
                 action = Action.WAIT
                 confidence = 0.0
                 reasons = []
+
+            action, confidence, reasons = self._apply_strategy_mode(
+                action,
+                confidence,
+                buy_signals,
+                sell_signals,
+                exit_signals,
+                reasons,
+            )
             
             risk = self._calculate_risk(signals)
 
@@ -289,7 +446,9 @@ class AggregatorAgent:
             )
             aggregated.source_signals = signals
 
-            if getattr(config.agent, "expert_council_enabled", True):
+            baseline_action = aggregated.action.value
+            council_on = getattr(config.agent, "expert_council_enabled", True)
+            if council_on:
                 refine_aggregate(
                     aggregated,
                     signals,
@@ -302,6 +461,7 @@ class AggregatorAgent:
                         config.agent, "expert_council_disagreement_penalty", 0.35
                     ),
                 )
+            aggregated.baseline_action = baseline_action
 
             return aggregated
             
@@ -313,29 +473,33 @@ class AggregatorAgent:
         """Weighted score for a group of signals."""
         if not signals:
             return 0.0
-        
-        total_score = 0.0
+
+        weighted_conf_sum = 0.0
         total_weight = 0.0
-        
+        unique_agents = set()
+
         for signal in signals:
             agent_type = signal.agent_type.lower()
             signal_type = signal.signal_type.lower()
-            
-            type_weight = self.signal_weights.get(agent_type, {}).get(signal_type, 0.5)
-            priority_weight = self.priority_weights.get(signal.priority, 0.5)
-            weight = type_weight * priority_weight
+
+            type_weight = float(self.signal_weights.get(agent_type, {}).get(signal_type, 0.45))
+            priority_weight = float(self.priority_weights.get(signal.priority, 0.5))
+            weight = max(0.05, type_weight * (0.5 + 0.5 * priority_weight))
+            signal_conf = self._signal_confidence(signal)
+
             total_weight += weight
-            total_score += weight
-        
+            weighted_conf_sum += weight * signal_conf
+            unique_agents.add(agent_type)
+
         if total_weight > 0:
-            score = min(total_score / total_weight, 1.0)
+            score = max(0.0, min(weighted_conf_sum / total_weight, 1.0))
         else:
             score = 0.0
-        
-        if len(signals) > 1:
-            consensus_bonus = min(len(signals) * 0.05, 0.2)
+
+        if len(unique_agents) > 1:
+            consensus_bonus = min((len(unique_agents) - 1) * 0.04, 0.16)
             score = min(score + consensus_bonus, 1.0)
-        
+
         return score
     
     def _extract_reasons(self, signals: List[Signal]) -> List[str]:
@@ -516,9 +680,12 @@ class AggregatorAgent:
 
         return "No clear edge; stand aside."
 
-    async def _save_aggregated_signal(self, aggregated: AggregatedSignal):
-        """Persist aggregated decision to SQLite."""
+    async def _save_aggregated_signal(
+        self, aggregated: AggregatedSignal, *, sent_telegram: bool
+    ):
+        """Persist aggregated decision to SQLite and optional outcome-tracking row."""
         try:
+            baseline = aggregated.baseline_action or aggregated.action.value
             await self.db.save_signal(
                 agent_type="aggregator",
                 signal_type=aggregated.action.value.lower(),
@@ -526,17 +693,41 @@ class AggregatorAgent:
                 message=f"{aggregated.action.value} signal for {aggregated.symbol}",
                 symbol=aggregated.symbol,
                 data={
-                    'confidence': aggregated.confidence,
-                    'risk': aggregated.risk.value,
-                    'action': aggregated.action.value,
-                    'reasons': aggregated.reasons,
-                    'price': aggregated.price,
-                    'entry': aggregated.entry,
-                    'sl': aggregated.sl,
-                    'tp': aggregated.tp,
-                    'source_signals_count': len(aggregated.source_signals)
-                }
+                    "confidence": aggregated.confidence,
+                    "risk": aggregated.risk.value,
+                    "action": aggregated.action.value,
+                    "baseline_action": baseline,
+                    "reasons": aggregated.reasons,
+                    "price": aggregated.price,
+                    "entry": aggregated.entry,
+                    "sl": aggregated.sl,
+                    "tp": aggregated.tp,
+                    "source_signals_count": len(aggregated.source_signals),
+                },
             )
+
+            if getattr(config.agent, "outcome_tracking_enabled", True):
+                horizon_sec = int(
+                    float(getattr(config.agent, "outcome_horizon_hours", 4)) * 3600.0
+                )
+                council_changed = baseline != aggregated.action.value
+                signal_ts = timegm(aggregated.timestamp.utctimetuple())
+                await self.db.insert_aggregated_outcome(
+                    signal_ts=signal_ts,
+                    symbol=aggregated.symbol,
+                    action=aggregated.action.value,
+                    baseline_action=baseline,
+                    confidence=float(aggregated.confidence),
+                    risk=aggregated.risk.value,
+                    price_at_signal=aggregated.price,
+                    reasons=list(aggregated.reasons or []),
+                    horizon_sec=horizon_sec,
+                    council_enabled=getattr(
+                        config.agent, "expert_council_enabled", True
+                    ),
+                    council_changed=council_changed,
+                    sent_telegram=sent_telegram,
+                )
         except Exception as e:
             self.logger.error("Failed to save aggregated signal: %s", e, exc_info=True)
 

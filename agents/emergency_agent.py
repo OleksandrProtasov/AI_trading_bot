@@ -1,5 +1,6 @@
 """High-priority alerts: volume spikes, fast moves, thin books, dump patterns."""
 import asyncio
+import time
 from typing import Dict, List
 
 from config import config
@@ -21,6 +22,10 @@ class EmergencyAgent:
         self.volume_threshold = config.agent.volume_spike_threshold
         self.price_change_threshold = config.agent.price_change_threshold
         self.stable_coins = config.stable_coins
+        self.signal_cooldown_sec = int(
+            getattr(config.agent, "emergency_signal_cooldown_sec", 120) or 120
+        )
+        self._last_signal_at: Dict[str, float] = {}
 
     async def start(self):
         self.running = True
@@ -103,7 +108,7 @@ class EmergencyAgent:
                 "reason": "Sharp increase in traded volume",
             },
         )
-        await self.event_router.add_signal(signal)
+        await self._emit_with_cooldown(signal)
 
     async def _trigger_price_spike_alert(
         self, symbol: str, price: float, change: float, direction: str
@@ -130,7 +135,7 @@ class EmergencyAgent:
                 "reason": f"Price moved {change * 100:.2f}% quickly",
             },
         )
-        await self.event_router.add_signal(signal)
+        await self._emit_with_cooldown(signal)
 
     async def _check_liquidity_crisis(self, symbol: str, orderbook: Dict, current_price: float):
         try:
@@ -162,7 +167,7 @@ class EmergencyAgent:
                         "reason": "Low visible depth near touch",
                     },
                 )
-                await self.event_router.add_signal(signal)
+                await self._emit_with_cooldown(signal)
         except Exception as e:
             self.logger.error("Liquidity check error: %s", e, exc_info=True)
 
@@ -202,9 +207,19 @@ class EmergencyAgent:
                         "reason": "Selling streak with rising volume",
                     },
                 )
-                await self.event_router.add_signal(signal)
+                await self._emit_with_cooldown(signal)
         except Exception as e:
             self.logger.error("Dump pattern check error: %s", e, exc_info=True)
+
+    async def _emit_with_cooldown(self, signal: Signal) -> None:
+        """Prevent same emergency alert type from firing too often per symbol."""
+        key = f"{signal.symbol}:{signal.signal_type}"
+        now = time.time()
+        last = self._last_signal_at.get(key, 0.0)
+        if now - last < self.signal_cooldown_sec:
+            return
+        self._last_signal_at[key] = now
+        await self.event_router.add_signal(signal)
 
     async def stop(self):
         self.running = False

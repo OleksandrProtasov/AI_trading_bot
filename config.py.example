@@ -1,132 +1,30 @@
 """
-Copy this file to `config.py` and set your values, or use environment variables.
-
-    copy config.py.example config.py   # Windows
-    cp config.py.example config.py     # Unix
-
-Environment variables override defaults where noted.
+config.py.example - пример файла конфигурации
+Скопируйте этот файл в config.py и заполните своими данными
 """
 import os
-from dataclasses import dataclass, field
-from typing import List
+
+# Telegram настройки
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
+
+# Binance настройки (не требуются для публичных данных)
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+
+# Ончейн API ключи (опционально, для расширенного функционала)
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
+BLOCKPI_API_KEY = os.getenv("BLOCKPI_API_KEY", "")
+
+# Настройки агентов
+MARKET_AGENT_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "DOTUSDT", "MATICUSDT", "AVAXUSDT"
+]
+
+WHALE_THRESHOLD_USD = 100000  # Порог для whale транзакций
+VOLUME_SPIKE_THRESHOLD = 3.0  # Порог всплеска объема (x среднего)
 
 
-@dataclass
-class TelegramConfig:
-    bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
 
 
-@dataclass
-class AgentConfig:
-    whale_threshold_usd: float = 100_000.0
-    volume_spike_threshold: float = 3.0
-    price_change_threshold: float = 0.05
-    min_confidence: float = 0.5
-    market_analysis_interval: int = 60
-    onchain_check_interval: int = 30
-    liquidity_analysis_interval: int = 30
-    shitcoin_scan_interval: int = 60
-    emergency_check_interval: int = 2
-    aggregation_interval: int = 10
-    max_signals_per_symbol: int = 50
-    signal_deduplication_window: int = 60
-    recent_signals_window: int = 60
-    # Rule-based "expert council" on top of aggregator scores (extensible to ML)
-    expert_council_enabled: bool = True
-    expert_council_disagreement_threshold: float = 0.45
-    expert_council_disagreement_penalty: float = 0.35
-
-
-@dataclass
-class DatabaseConfig:
-    db_path: str = "crypto_analytics.db"
-    backup_interval_hours: int = 24
-
-
-@dataclass
-class BinanceConfig:
-    websocket_url: str = "wss://stream.binance.com:9443/stream"
-    reconnect_delay: int = 5
-    ping_interval: int = 20
-    ping_timeout: int = 10
-    orderbook_chunk_size: int = 5
-
-
-@dataclass
-class DexScreenerConfig:
-    base_url: str = "https://api.dexscreener.com/latest/dex"
-    timeout: int = 10
-    max_retries: int = 3
-    retry_delay: float = 1.0
-
-
-@dataclass
-class Config:
-    telegram: TelegramConfig = field(default_factory=TelegramConfig)
-    agent: AgentConfig = field(default_factory=AgentConfig)
-    database: DatabaseConfig = field(default_factory=DatabaseConfig)
-    binance: BinanceConfig = field(default_factory=BinanceConfig)
-    dexscreener: DexScreenerConfig = field(default_factory=DexScreenerConfig)
-    default_symbols: List[str] = field(
-        default_factory=lambda: [
-            "BTCUSDT",
-            "ETHUSDT",
-            "BNBUSDT",
-            "SOLUSDT",
-            "XRPUSDT",
-            "ADAUSDT",
-            "DOGEUSDT",
-            "DOTUSDT",
-            "MATICUSDT",
-            "AVAXUSDT",
-            "LINKUSDT",
-            "UNIUSDT",
-            "ATOMUSDT",
-            "ETCUSDT",
-            "LTCUSDT",
-            "BCHUSDT",
-            "XLMUSDT",
-            "ALGOUSDT",
-            "VETUSDT",
-            "FILUSDT",
-        ]
-    )
-    stable_coins: set = field(
-        default_factory=lambda: {
-            "USDT",
-            "USDC",
-            "BUSD",
-            "DAI",
-            "TUSD",
-            "PAXG",
-            "GUSD",
-            "HUSD",
-        }
-    )
-    log_level: str = os.getenv("LOG_LEVEL", "INFO")
-    log_dir: str = "logs"
-
-    def validate(self) -> bool:
-        errors = []
-        if not self.telegram.bot_token:
-            errors.append("TELEGRAM_BOT_TOKEN is not set")
-        if not self.telegram.chat_id:
-            errors.append("TELEGRAM_CHAT_ID is not set")
-        if not self.default_symbols:
-            errors.append("No symbols configured")
-        if self.agent.min_confidence < 0 or self.agent.min_confidence > 1:
-            errors.append("min_confidence must be between 0 and 1")
-        if errors:
-            print("Configuration errors:")
-            for err in errors:
-                print(f"  - {err}")
-            return False
-        return True
-
-
-config = Config()
-
-# Backward compatibility for tests that import module-level names:
-TELEGRAM_BOT_TOKEN = config.telegram.bot_token
-TELEGRAM_CHAT_ID = config.telegram.chat_id

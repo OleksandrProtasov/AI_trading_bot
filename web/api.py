@@ -17,6 +17,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.database import Database
 from core.metrics import Metrics
 from core.health_check import HealthCheck
+from core.runtime_paths import resolved_database_path
+from core.backtest_portfolio import (
+    BacktestConfig,
+    DEFAULT_RAW_AGENT_TYPES,
+    run_aggregator_backtest,
+    run_backtest_compare,
+    run_raw_signals_backtest,
+)
 
 # module singletons
 db: Database = None
@@ -27,7 +35,7 @@ health_check: HealthCheck = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global db, metrics, health_check
-    db = Database("crypto_analytics.db")
+    db = Database(resolved_database_path())
     metrics = Metrics(db)
     health_check = HealthCheck()
     yield
@@ -143,6 +151,16 @@ async def get_signal(signal_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/outcomes/summary")
+async def outcomes_summary(hours: int = Query(168, ge=1, le=8760)):
+    """Hit rate and avg return by action for evaluated aggregated signals."""
+    try:
+        since_ts = int((datetime.utcnow() - timedelta(hours=hours)).timestamp())
+        return await db.get_aggregated_outcomes_summary(since_ts)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # --- Metrics ---
 
 @app.get("/api/metrics")
@@ -151,6 +169,98 @@ async def get_metrics(hours: int = Query(24, ge=1, le=720)):
     try:
         stats = await metrics.get_statistics(hours)
         return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/backtest/aggregator")
+async def backtest_aggregator(
+    hours: int = Query(24 * 30, ge=1, le=24 * 365 * 5),
+    min_confidence: float = Query(0.55, ge=0.0, le=1.0),
+    horizon_minutes: int = Query(240, ge=5, le=24 * 60),
+    fee_bps: float = Query(5.0, ge=0.0, le=100.0),
+    max_open: int = Query(1, ge=1, le=20),
+):
+    """Historical backtest over saved aggregator signals."""
+    try:
+        since_ts = int((datetime.utcnow() - timedelta(hours=hours)).timestamp())
+        cfg = BacktestConfig(
+            min_confidence=min_confidence,
+            horizon_minutes=horizon_minutes,
+            fee_bps_per_side=fee_bps,
+            max_open_positions=max_open,
+        )
+        return run_aggregator_backtest(db.db_path, start_ts=since_ts, cfg=cfg)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/backtest/raw")
+async def backtest_raw(
+    hours: int = Query(24 * 30, ge=1, le=24 * 365 * 5),
+    min_confidence: float = Query(0.55, ge=0.0, le=1.0),
+    horizon_minutes: int = Query(240, ge=5, le=24 * 60),
+    fee_bps: float = Query(5.0, ge=0.0, le=100.0),
+    max_open: int = Query(1, ge=1, le=20),
+    raw_include_stables: bool = Query(
+        True,
+        description="If false, skip signals on stablecoin symbols",
+    ),
+    raw_agents: Optional[str] = Query(
+        None,
+        description="Comma-separated agent_type list (default: market,liquidity,onchain,emergency)",
+    ),
+):
+    """Historical backtest over raw agent signals (heuristic side from signal_type)."""
+    try:
+        since_ts = int((datetime.utcnow() - timedelta(hours=hours)).timestamp())
+        cfg = BacktestConfig(
+            min_confidence=min_confidence,
+            horizon_minutes=horizon_minutes,
+            fee_bps_per_side=fee_bps,
+            max_open_positions=max_open,
+            raw_include_stables=raw_include_stables,
+        )
+        agents = (
+            tuple(a.strip() for a in raw_agents.split(",") if a.strip())
+            if raw_agents
+            else DEFAULT_RAW_AGENT_TYPES
+        )
+        return run_raw_signals_backtest(
+            db.db_path, start_ts=since_ts, cfg=cfg, agent_types=agents
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/backtest/compare")
+async def backtest_compare(
+    hours: int = Query(24 * 30, ge=1, le=24 * 365 * 5),
+    min_confidence: float = Query(0.55, ge=0.0, le=1.0),
+    horizon_minutes: int = Query(240, ge=5, le=24 * 60),
+    fee_bps: float = Query(5.0, ge=0.0, le=100.0),
+    max_open: int = Query(1, ge=1, le=20),
+    raw_include_stables: bool = Query(True),
+    raw_agents: Optional[str] = Query(None),
+):
+    """Compare aggregator vs raw-agent heuristic backtest on the same window."""
+    try:
+        since_ts = int((datetime.utcnow() - timedelta(hours=hours)).timestamp())
+        cfg = BacktestConfig(
+            min_confidence=min_confidence,
+            horizon_minutes=horizon_minutes,
+            fee_bps_per_side=fee_bps,
+            max_open_positions=max_open,
+            raw_include_stables=raw_include_stables,
+        )
+        agents = (
+            tuple(a.strip() for a in raw_agents.split(",") if a.strip())
+            if raw_agents
+            else DEFAULT_RAW_AGENT_TYPES
+        )
+        return run_backtest_compare(
+            db.db_path, start_ts=since_ts, cfg=cfg, raw_agent_types=agents
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -448,7 +558,19 @@ async def get_performance_stats():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+
+    _port = 8001
+    print(
+        f"\n  REST API: http://127.0.0.1:{_port}\n"
+        f"  OpenAPI:  http://127.0.0.1:{_port}/docs\n",
+        flush=True,
+    )
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=_port,
+        log_level="info",
+    )
 
 
 

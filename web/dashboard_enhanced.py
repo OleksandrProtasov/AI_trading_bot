@@ -18,6 +18,7 @@ from core.database import Database
 from core.health_check import HealthCheck
 from core.metrics import Metrics
 from core.analytics import Analytics
+from core.runtime_paths import resolved_database_path
 
 # process-level singletons (dashboard process only)
 db: Database = None
@@ -30,7 +31,7 @@ active_connections: List[WebSocket] = []
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global db, health_check, metrics, analytics
-    db = Database("crypto_analytics.db")
+    db = Database(resolved_database_path())
     health_check = HealthCheck()
     metrics = Metrics(db)
     analytics = Analytics(db)
@@ -259,9 +260,17 @@ async def get_dashboard():
     </div>
     
     <script>
-        const ws = new WebSocket(`ws://${window.location.host}/ws`);
+        const _wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const ws = new WebSocket(`${_wsProto}//${window.location.host}/ws`);
         let signalsChart, agentsChart;
         let currentFilters = { hours: 24 };
+
+        function restApiBase() {
+            const h = window.location.hostname;
+            const p = window.location.port;
+            if (p === "8000") return window.location.protocol + "//" + h + ":8001";
+            return "";
+        }
         
         ws.onopen = () => {
             console.log('WebSocket connected');
@@ -293,7 +302,9 @@ async def get_dashboard():
         }
         
         function exportData() {
-            window.open(`/api/export/json?hours=${currentFilters.hours}`, '_blank');
+            const base = restApiBase();
+            const path = `/api/export/json?hours=${currentFilters.hours}`;
+            window.open(base ? base + path : path, "_blank");
         }
         
         function updateDashboard(data) {
@@ -528,7 +539,19 @@ async def websocket_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    _port = 8000
+    print(
+        f"\n  Dashboard: http://127.0.0.1:{_port}\n"
+        f"  (Export JSON uses REST API on port 8001 - start web/api.py too.)\n",
+        flush=True,
+    )
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=_port,
+        log_level="info",
+    )
 
 
 

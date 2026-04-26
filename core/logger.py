@@ -1,12 +1,15 @@
 """Rotating file + console logging helpers."""
 import logging
 import os
-from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
-def setup_logger(name: str, log_dir: str = "logs", level: int = logging.INFO) -> logging.Logger:
+def setup_logger(
+    name: str,
+    log_dir: str = "logs",
+    level: int | None = None,
+) -> logging.Logger:
     """
     Настройка логгера с файловым и консольным выводом
     
@@ -18,9 +21,14 @@ def setup_logger(name: str, log_dir: str = "logs", level: int = logging.INFO) ->
     Returns:
         Настроенный логгер
     """
+    if level is None:
+        level = getattr(
+            logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO
+        )
+
     # Создаем директорию для логов
-    Path(log_dir).mkdir(exist_ok=True)
-    
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+
     logger = logging.getLogger(name)
     logger.setLevel(level)
     
@@ -48,9 +56,14 @@ def setup_logger(name: str, log_dir: str = "logs", level: int = logging.INFO) ->
     file_handler.setLevel(level)
     file_handler.setFormatter(file_formatter)
     
-    # Консольный handler
+    # Консоль: по умолчанию тот же уровень, что и файл (INFO — видно, что происходит).
+    # Узко: CONSOLE_LOG_LEVEL=WARNING
+    _cl = os.getenv("CONSOLE_LOG_LEVEL", "").strip().upper()
+    console_level = (
+        getattr(logging, _cl, level) if _cl else level
+    )
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.WARNING)  # В консоль только WARNING и выше
+    console_handler.setLevel(console_level)
     console_handler.setFormatter(console_formatter)
     
     logger.addHandler(file_handler)

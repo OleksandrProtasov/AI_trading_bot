@@ -3,8 +3,11 @@ import sqlite3
 import asyncio
 from datetime import datetime
 from typing import Optional, Dict, List, Any
+
 import json
+
 from core.logger import get_logger
+from core.outcome_math import compute_path_metrics
 
 
 class Database:
@@ -97,6 +100,35 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_whale_timestamp ON whale_transactions(timestamp)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_anomalies_timestamp ON anomalies(timestamp)")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS aggregated_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_ts INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                action TEXT NOT NULL,
+                baseline_action TEXT NOT NULL,
+                council_enabled INTEGER NOT NULL DEFAULT 1,
+                council_changed INTEGER NOT NULL DEFAULT 0,
+                confidence REAL NOT NULL,
+                risk TEXT NOT NULL,
+                price_at_signal REAL,
+                reasons_json TEXT,
+                horizon_sec INTEGER NOT NULL,
+                sent_telegram INTEGER NOT NULL DEFAULT 0,
+                evaluated_at INTEGER,
+                close_at_horizon REAL,
+                return_pct REAL,
+                max_adverse_pct REAL,
+                max_favorable_pct REAL,
+                directional_hit INTEGER,
+                evaluation_note TEXT
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agg_outcomes_pending "
+            "ON aggregated_outcomes(evaluated_at, signal_ts)"
+        )
         
         conn.commit()
         conn.close()
@@ -233,6 +265,246 @@ class Database:
                 conn.commit()
             except Exception as e:
                 self.logger.error("mark_signal_sent failed: %s", e, exc_info=True)
+            finally:
+                conn.close()
+
+    async def insert_aggregated_outcome(
+        self,
+        *,
+        signal_ts: int,
+        symbol: str,
+        action: str,
+        baseline_action: str,
+        confidence: float,
+        risk: str,
+        price_at_signal: Optional[float],
+        reasons: Optional[List[str]],
+        horizon_sec: int,
+        council_enabled: bool,
+        council_changed: bool,
+        sent_telegram: bool,
+    ) -> Optional[int]:
+        """Record one aggregated decision for later horizon evaluation."""
+        sym = (symbol or "").strip()
+        if not sym:
+            return None
+        async with self.lock:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO aggregated_outcomes (
+                        signal_ts, symbol, action, baseline_action,
+                        council_enabled, council_changed,
+                        confidence, risk, price_at_signal, reasons_json,
+                        horizon_sec, sent_telegram
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        signal_ts,
+                        sym,
+                        action.upper(),
+                        baseline_action.upper(),
+                        1 if council_enabled else 0,
+                        1 if council_changed else 0,
+                        confidence,
+                        risk,
+                        price_at_signal,
+                        json.dumps(reasons or []),
+                        int(horizon_sec),
+                        1 if sent_telegram else 0,
+                    ),
+                )
+                conn.commit()
+                return cursor.lastrowid
+            except Exception as e:
+                self.logger.error("insert_aggregated_outcome failed: %s", e, exc_info=True)
+                return None
+            finally:
+                conn.close()
+
+    async def evaluate_pending_aggregated_outcomes(
+        self,
+        now_ts: int,
+        *,
+        direction_threshold_pct: float = 0.05,
+        candle_timeframe: str = "1m",
+    ) -> int:
+        """
+        Fill metrics for rows whose horizon has passed. Rows without candles
+        are left pending (evaluated_at stays NULL).
+
+        Returns number of rows updated.
+        """
+        async with self.lock:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            updated = 0
+            try:
+                cursor.execute(
+                    """
+                    SELECT id, symbol, signal_ts, horizon_sec, price_at_signal, action
+                    FROM aggregated_outcomes
+                    WHERE evaluated_at IS NULL
+                      AND (? >= signal_ts + horizon_sec)
+                    """,
+                    (now_ts,),
+                )
+                rows = cursor.fetchall()
+                for row in rows:
+                    oid = row["id"]
+                    symbol = row["symbol"]
+                    signal_ts = int(row["signal_ts"])
+                    horizon_sec = int(row["horizon_sec"])
+                    price_at_signal = row["price_at_signal"]
+                    action = row["action"]
+                    end_ts = signal_ts + horizon_sec
+
+                    candles: List[Dict[str, Any]] = []
+                    for sym_variant in (
+                        symbol,
+                        symbol.upper(),
+                        symbol.lower(),
+                    ):
+                        cursor.execute(
+                            """
+                            SELECT timestamp, open, high, low, close, volume
+                            FROM candles
+                            WHERE symbol = ? AND timeframe = ?
+                              AND timestamp >= ? AND timestamp <= ?
+                            ORDER BY timestamp ASC
+                            """,
+                            (sym_variant, candle_timeframe, signal_ts, end_ts),
+                        )
+                        raw = cursor.fetchall()
+                        if raw:
+                            candles = [dict(r) for r in raw]
+                            break
+                    if not candles:
+                        continue
+
+                    entry = float(price_at_signal) if price_at_signal else 0.0
+                    if entry <= 0:
+                        entry = float(candles[0]["close"])
+
+                    metrics = compute_path_metrics(
+                        entry,
+                        action,
+                        candles,
+                        direction_threshold_pct=direction_threshold_pct,
+                    )
+                    if not metrics:
+                        cursor.execute(
+                            """
+                            UPDATE aggregated_outcomes
+                            SET evaluated_at = ?, evaluation_note = ?
+                            WHERE id = ?
+                            """,
+                            (now_ts, "no_metrics", oid),
+                        )
+                        updated += 1
+                        continue
+
+                    dh = metrics["directional_hit"]
+                    dh_sql = dh if dh is not None else None
+
+                    cursor.execute(
+                        """
+                        UPDATE aggregated_outcomes
+                        SET evaluated_at = ?,
+                            close_at_horizon = ?,
+                            return_pct = ?,
+                            max_adverse_pct = ?,
+                            max_favorable_pct = ?,
+                            directional_hit = ?,
+                            evaluation_note = NULL
+                        WHERE id = ?
+                        """,
+                        (
+                            now_ts,
+                            metrics["close_at_horizon"],
+                            metrics["return_pct"],
+                            metrics["max_adverse_pct"],
+                            metrics["max_favorable_pct"],
+                            dh_sql,
+                            oid,
+                        ),
+                    )
+                    updated += 1
+
+                conn.commit()
+                return updated
+            except Exception as e:
+                self.logger.error("evaluate_pending_aggregated_outcomes failed: %s", e, exc_info=True)
+                return updated
+            finally:
+                conn.close()
+
+    async def get_aggregated_outcomes_summary(
+        self, since_ts: int
+    ) -> Dict[str, Any]:
+        """Aggregate stats for evaluated rows since since_ts (unix)."""
+        async with self.lock:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    SELECT action,
+                           COUNT(*) AS n,
+                           AVG(return_pct) AS avg_ret,
+                           AVG(CASE WHEN directional_hit = 1 THEN 1.0 ELSE 0.0 END) AS hit_rate
+                    FROM aggregated_outcomes
+                    WHERE evaluated_at IS NOT NULL
+                      AND evaluated_at >= ?
+                      AND directional_hit IS NOT NULL
+                    GROUP BY action
+                    """,
+                    (since_ts,),
+                )
+                by_action = [dict(r) for r in cursor.fetchall()]
+
+                cursor.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total_evaluated,
+                        SUM(CASE WHEN council_changed = 1 THEN 1 ELSE 0 END) AS council_changes,
+                        AVG(
+                            CASE directional_hit
+                                WHEN 1 THEN 1.0
+                                WHEN 0 THEN 0.0
+                                ELSE NULL
+                            END
+                        ) AS overall_hit_rate
+                    FROM aggregated_outcomes
+                    WHERE evaluated_at IS NOT NULL
+                      AND evaluated_at >= ?
+                    """,
+                    (since_ts,),
+                )
+                overall = dict(cursor.fetchone() or {})
+
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) FROM aggregated_outcomes
+                    WHERE signal_ts >= ? AND evaluated_at IS NULL
+                    """,
+                    (since_ts,),
+                )
+                pending = cursor.fetchone()[0]
+
+                return {
+                    "since_ts": since_ts,
+                    "by_action": by_action,
+                    "overall": overall,
+                    "pending_horizon": pending,
+                }
+            except Exception as e:
+                self.logger.error("get_aggregated_outcomes_summary failed: %s", e, exc_info=True)
+                return {"since_ts": since_ts, "error": str(e)}
             finally:
                 conn.close()
 

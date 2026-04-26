@@ -62,7 +62,8 @@ class HealthCheck:
 
             if hasattr(info["instance"], "running"):
                 if not info["instance"].running:
-                    status = HealthStatus.UNHEALTHY
+                    # Still starting (gather may not have entered agent.start() yet)
+                    status = HealthStatus.UNKNOWN
                 else:
                     last = info["last_activity"]
                     if last is None:
@@ -91,7 +92,10 @@ class HealthCheck:
                 await self.check_health()
 
                 for agent_name, info in self.agents_status.items():
-                    if info["status"] != HealthStatus.HEALTHY:
+                    if info["status"] in (
+                        HealthStatus.DEGRADED,
+                        HealthStatus.UNHEALTHY,
+                    ):
                         self.logger.warning(
                             "Agent %s: %s (errors=%s last_activity=%s)",
                             agent_name,
