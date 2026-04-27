@@ -223,7 +223,10 @@ def main() -> None:
     args = p.parse_args()
 
     db_path = resolved_database_path()
-    start_ts = _hours_ago_ts(args.hours)
+    if args.end_ts is not None:
+        start_ts = int(args.end_ts) - int(args.hours * 3600)
+    else:
+        start_ts = _hours_ago_ts(args.hours)
 
     # Keep weights aligned with runtime aggregator defaults.
     weights = {

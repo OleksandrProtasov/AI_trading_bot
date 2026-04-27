@@ -234,6 +234,89 @@ class AggregatorAgent:
         # balanced or unknown
         return action, confidence, reasons
 
+    def _expected_edge_bps(
+        self,
+        *,
+        confidence: float,
+        margin: float,
+        source_count: int,
+        bearish_pressure: int,
+        emergency_count: int,
+        buy_count: int,
+        sell_count: int,
+    ) -> float:
+        """
+        Live EV proxy aligned with replay optimizer:
+        positive drivers -> confidence/margin/source confirmations,
+        negative drivers -> bearish pressure/emergency load/directional conflict.
+        """
+        conf_mult = float(getattr(config.agent, "ev_confidence_mult", 18.0))
+        margin_mult = float(getattr(config.agent, "ev_margin_mult", 22.0))
+        source_mult = float(getattr(config.agent, "ev_source_mult", 3.0))
+        bearish_penalty_mult = float(
+            getattr(config.agent, "ev_bearish_penalty_mult", 6.0)
+        )
+        emergency_penalty_mult = float(
+            getattr(config.agent, "ev_emergency_penalty_mult", 4.0)
+        )
+        conflict_penalty_mult = float(
+            getattr(config.agent, "ev_conflict_penalty_mult", 25.0)
+        )
+
+        conf_term = max(0.0, confidence - 0.5) * conf_mult
+        margin_term = max(0.0, margin) * margin_mult
+        source_term = max(0, source_count - 1) * source_mult
+        bearish_penalty = max(0, bearish_pressure) * bearish_penalty_mult
+        emergency_penalty = max(0, emergency_count) * emergency_penalty_mult
+        conflict_penalty = (
+            float(min(buy_count, sell_count)) / float(max(1, buy_count + sell_count))
+        ) * conflict_penalty_mult
+        return (
+            conf_term
+            + margin_term
+            + source_term
+            - bearish_penalty
+            - emergency_penalty
+            - conflict_penalty
+        )
+
+    def _passes_ev_gate(
+        self,
+        *,
+        action: Action,
+        confidence: float,
+        margin: float,
+        source_count: int,
+        bearish_pressure: int,
+        emergency_count: int,
+        buy_count: int,
+        sell_count: int,
+    ) -> bool:
+        """
+        EV gate for directional entries.
+        Uses bps cost floor + safety buffer. EXIT/WAIT are not blocked.
+        """
+        if action not in (Action.BUY, Action.SELL):
+            return True
+        enabled = bool(getattr(config.agent, "ev_gate_enabled", True))
+        if not enabled:
+            return True
+
+        fee_bps_per_side = float(getattr(config.agent, "ev_fee_bps_per_side", 2.0))
+        slippage_bps = float(getattr(config.agent, "ev_slippage_bps", 3.0))
+        buffer_bps = float(getattr(config.agent, "ev_buffer_bps", 8.0))
+        required_bps = 2.0 * fee_bps_per_side + slippage_bps + buffer_bps
+        edge_bps = self._expected_edge_bps(
+            confidence=confidence,
+            margin=margin,
+            source_count=source_count,
+            bearish_pressure=bearish_pressure,
+            emergency_count=emergency_count,
+            buy_count=buy_count,
+            sell_count=sell_count,
+        )
+        return edge_bps >= required_bps
+
     async def start(self):
         """Start background aggregation tasks."""
         self.running = True
@@ -352,6 +435,24 @@ class AggregatorAgent:
                         exit_signals.append(signal)
                 elif cls == "exit":
                     exit_signals.append(signal)
+            bearish_pressure = 0
+            emergency_count = 0
+            for s in signals:
+                if s.agent_type == "emergency":
+                    emergency_count += 1
+                st = (s.signal_type or "").lower()
+                if any(
+                    k in st
+                    for k in (
+                        "dump",
+                        "danger",
+                        "crisis",
+                        "sell",
+                        "support_break",
+                        "exit",
+                    )
+                ):
+                    bearish_pressure += 1
             
             buy_score = self._calculate_score(buy_signals)
             sell_score = self._calculate_score(sell_signals)
@@ -393,6 +494,19 @@ class AggregatorAgent:
                 exit_signals,
                 reasons,
             )
+            if not self._passes_ev_gate(
+                action=action,
+                confidence=confidence,
+                margin=score_margin,
+                source_count=len(signals),
+                bearish_pressure=bearish_pressure,
+                emergency_count=emergency_count,
+                buy_count=len(buy_signals),
+                sell_count=len(sell_signals),
+            ):
+                action = Action.WAIT
+                confidence = min(confidence, 0.45)
+                reasons = reasons + ["EV gate: expected edge below costs."]
             
             risk = self._calculate_risk(signals)
 

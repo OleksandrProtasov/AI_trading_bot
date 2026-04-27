@@ -1,6 +1,7 @@
 """
-config.py.example - пример файла конфигурации
-Скопируйте этот файл в config.py и заполните своими данными
+Legacy example.
+Main runtime config now lives in `config.py` + `.env`.
+Use `.env.example` as the primary template.
 """
 import os
 
@@ -24,6 +25,12 @@ MARKET_AGENT_SYMBOLS = [
 
 WHALE_THRESHOLD_USD = 100000  # Порог для whale транзакций
 VOLUME_SPIKE_THRESHOLD = 3.0  # Порог всплеска объема (x среднего)
+
+# EV gate (live aggregator) defaults, mirrored in .env.example.
+AGG_EV_GATE_ENABLED = os.getenv("AGG_EV_GATE_ENABLED", "1")
+AGG_EV_FEE_BPS_PER_SIDE = os.getenv("AGG_EV_FEE_BPS_PER_SIDE", "2")
+AGG_EV_SLIPPAGE_BPS = os.getenv("AGG_EV_SLIPPAGE_BPS", "3")
+AGG_EV_BUFFER_BPS = os.getenv("AGG_EV_BUFFER_BPS", "8")
 
 
 
