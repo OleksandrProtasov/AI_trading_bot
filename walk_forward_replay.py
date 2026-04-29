@@ -218,6 +218,10 @@ def _now_ts() -> int:
     return int(time.time())
 
 
+def _time_exceeded(deadline_ts: float | None) -> bool:
+    return deadline_ts is not None and time.time() >= deadline_ts
+
+
 def _evaluate_for_step(
     *,
     args: argparse.Namespace,
@@ -229,12 +233,17 @@ def _evaluate_for_step(
     ev_bear: List[float],
     ev_emg: List[float],
     ev_conflict: List[float],
-) -> Tuple[List[Dict[str, Any]], int]:
+    deadline_ts: float | None,
+) -> Tuple[List[Dict[str, Any]], int, bool]:
     items: List[Dict[str, Any]] = []
     checked = 0
+    timed_out = False
     for vals in product(
         ev_buffers, ev_conf, ev_margin, ev_source, ev_bear, ev_emg, ev_conflict
     ):
+        if _time_exceeded(deadline_ts):
+            timed_out = True
+            break
         (
             ev_buffer_bps,
             ev_confidence_mult,
@@ -248,6 +257,9 @@ def _evaluate_for_step(
         window_results = []
         failed = None
         for end_ts in end_points:
+            if _time_exceeded(deadline_ts):
+                timed_out = True
+                break
             try:
                 res, used_profile = _run_window_bootstrapped(
                     args=args,
@@ -282,6 +294,8 @@ def _evaluate_for_step(
             except Exception as exc:
                 failed = str(exc)
                 break
+        if timed_out:
+            break
 
         params = {
             "ev_buffer_bps": ev_buffer_bps,
@@ -321,7 +335,7 @@ def _evaluate_for_step(
                 "score": total_score,
             }
         )
-    return items, checked
+    return items, checked, timed_out
 
 
 def main() -> None:
@@ -335,6 +349,12 @@ def main() -> None:
         help="Optional comma list for adaptive step search, e.g. 168,72,48,24,12",
     )
     p.add_argument("--windows", type=int, default=4)
+    p.add_argument(
+        "--max-runtime-sec",
+        type=int,
+        default=0,
+        help="Hard time budget for this run. 0 = unlimited.",
+    )
     p.add_argument("--end-ts", type=int, default=None)
     p.add_argument("--horizon-minutes", type=int, default=30)
     p.add_argument("--recent-window-sec", type=int, default=60)
@@ -392,9 +412,17 @@ def main() -> None:
     items: List[Dict[str, Any]] = []
     checked = 0
     selected_step = step_candidates[0]
+    timed_out = False
+    started_at = time.time()
+    deadline_ts: float | None = None
+    if int(args.max_runtime_sec) > 0:
+        deadline_ts = started_at + int(args.max_runtime_sec)
     for step_h in step_candidates:
+        if _time_exceeded(deadline_ts):
+            timed_out = True
+            break
         end_points = [base_end - i * step_h * 3600 for i in range(args.windows)]
-        candidate_items, candidate_checked = _evaluate_for_step(
+        candidate_items, candidate_checked, candidate_timed_out = _evaluate_for_step(
             args=args,
             end_points=end_points,
             ev_buffers=ev_buffers,
@@ -404,8 +432,11 @@ def main() -> None:
             ev_bear=ev_bear,
             ev_emg=ev_emg,
             ev_conflict=ev_conflict,
+            deadline_ts=deadline_ts,
         )
         checked += candidate_checked
+        if candidate_timed_out:
+            timed_out = True
         ranked_candidate = sorted(
             candidate_items, key=lambda x: float(x.get("score", -1e9)), reverse=True
         )
@@ -416,12 +447,16 @@ def main() -> None:
         # Keep latest attempt for diagnostics if none is valid.
         items = candidate_items
         selected_step = step_h
+        if timed_out:
+            break
 
     ranked = sorted(items, key=lambda x: float(x.get("score", -1e9)), reverse=True)
     top_n = max(1, int(args.top))
     out = {
         "note": "Walk-forward replay EV ranking (historical only).",
         "checked": checked,
+        "timed_out": timed_out,
+        "elapsed_sec": round(time.time() - started_at, 2),
         "window_hours": args.window_hours,
         "step_hours": selected_step,
         "auto_step_hours": step_candidates,
