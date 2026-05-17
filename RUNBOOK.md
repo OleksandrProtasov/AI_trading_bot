@@ -97,3 +97,58 @@ History is stored at `reports/daily_research_history.json`.
 Latest full WF output is stored at `reports/latest_wf.json`.
 Best EV params for quick copy are stored at `reports/best_params.env`.
 Auto-promoted params are stored at `reports/promoted_best.env`.
+
+## 7) Apply promoted params to live `.env`
+
+Dry-run:
+
+```powershell
+python apply_promoted_env.py --dry-run
+```
+
+Apply (only `AGG_EV_*` keys are touched):
+
+```powershell
+python apply_promoted_env.py
+```
+
+API snapshot for dashboard:
+
+- `GET /api/research/summary`
+
+## 8) Agent edge report (who helps / hurts)
+
+```powershell
+python agent_edge_report.py --hours 720
+```
+
+Use this to decide which agents to trust before changing weights.
+
+```powershell
+python sync_agent_weights.py --hours 720
+```
+
+Restart bot/API after sync so aggregator loads `reports/agent_weights.json`.
+
+## 9) BTC trend filter (alt BUY gate)
+
+When BTC 30m return is below threshold (default `-0.08%`), altcoin `BUY` signals are blocked.
+Configure via `.env`: `AGG_BTC_TREND_*`.
+
+## 10) R:R gate (min expected move)
+
+Requires expected edge >= fees + slippage + buffer + **15 bps** (0.15%) profit floor:
+
+```env
+AGG_RR_GATE_ENABLED=1
+AGG_RR_MIN_PROFIT_BPS=15
+```
+
+## 11) Outcome-based edge calibration
+
+```powershell
+python sync_edge_calibration.py --hours 720 --min-samples 30
+```
+
+Writes `reports/edge_calibration.json`. Restart bot after sync.
+Add to daily loop after `sync_agent_weights.py`.

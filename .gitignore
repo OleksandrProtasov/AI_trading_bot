@@ -44,6 +44,10 @@ config.py
 # Logs
 *.log
 
+# Generated research artifacts (keep folder via reports/.gitkeep)
+reports/*
+!reports/.gitkeep
+
 # OS
 .DS_Store
 Thumbs.db

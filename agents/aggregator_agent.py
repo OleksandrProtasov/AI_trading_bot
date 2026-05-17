@@ -10,6 +10,12 @@ from core.event_router import EventRouter, Signal, Priority
 from core.logger import get_logger
 from core.utils import is_stable_coin, validate_price
 from core.metrics import Metrics
+from core.agent_weights import load_agent_weights
+from core.bearish_regime import bearish_regime_reason, is_bearish_regime
+from core.btc_trend import btc_trend_at_ts
+from core.entry_quality import passes_entry_quality
+from core.edge_calibration import calibration_extra_bps, load_calibration
+from core.ev_edge import evaluate_edge_gate
 from core.expert_council import refine_aggregate
 from config import config
 
@@ -90,12 +96,12 @@ class AggregatorAgent:
                 "liquidity_break": 0.8
             },
             "shitcoin": {
-                "pump": 0.9,
-                "dump": 1.0,
-                "rapid_pump": 1.0,
-                "rapid_dump": 1.0,
-                "new_shitcoin": 0.3
-            }
+                "pump": 0.45,
+                "dump": 0.55,
+                "rapid_pump": 0.5,
+                "rapid_dump": 0.55,
+                "new_shitcoin": 0.2,
+            },
         }
         
         self.priority_weights = {
@@ -105,7 +111,16 @@ class AggregatorAgent:
             Priority.MEDIUM: 0.4,
             Priority.LOW: 0.2
         }
-        
+        self.agent_weight_mult = load_agent_weights()
+        if self.agent_weight_mult:
+            self.logger.info("Loaded agent weight multipliers: %s", self.agent_weight_mult)
+        self.edge_calibration = load_calibration()
+        if self.edge_calibration.get("buckets"):
+            self.logger.info(
+                "Loaded edge calibration buckets: %s",
+                len(self.edge_calibration.get("buckets", {})),
+            )
+
         self.signal_queue = asyncio.Queue()
 
     def _signal_confidence(self, signal: Signal) -> float:
@@ -207,6 +222,23 @@ class AggregatorAgent:
                 f"Bearish guard: buy blocked ({bearish_pressure})."
             ]
 
+        buy_score_est = self._calculate_score(buy_signals)
+        sell_score_est = self._calculate_score(sell_signals)
+        if (
+            bool(getattr(config.agent, "agg_bearish_regime_enabled", True))
+            and action == Action.BUY
+            and is_bearish_regime(
+                buy_count=len(buy_signals),
+                sell_count=len(sell_signals),
+                exit_count=len(exit_signals),
+                emergency_count=sum(1 for s in buy_signals + sell_signals + exit_signals if s.agent_type == "emergency"),
+                bearish_pressure=bearish_pressure,
+                buy_score=buy_score_est,
+                sell_score=sell_score_est,
+            )
+        ):
+            return Action.WAIT, min(confidence, 0.38), reasons + [bearish_regime_reason()]
+
         if mode == "trend_following":
             if action == Action.BUY:
                 if confidence < min_conf or buy_confirms < req_confirms or not has_market_buy:
@@ -234,52 +266,6 @@ class AggregatorAgent:
         # balanced or unknown
         return action, confidence, reasons
 
-    def _expected_edge_bps(
-        self,
-        *,
-        confidence: float,
-        margin: float,
-        source_count: int,
-        bearish_pressure: int,
-        emergency_count: int,
-        buy_count: int,
-        sell_count: int,
-    ) -> float:
-        """
-        Live EV proxy aligned with replay optimizer:
-        positive drivers -> confidence/margin/source confirmations,
-        negative drivers -> bearish pressure/emergency load/directional conflict.
-        """
-        conf_mult = float(getattr(config.agent, "ev_confidence_mult", 18.0))
-        margin_mult = float(getattr(config.agent, "ev_margin_mult", 22.0))
-        source_mult = float(getattr(config.agent, "ev_source_mult", 3.0))
-        bearish_penalty_mult = float(
-            getattr(config.agent, "ev_bearish_penalty_mult", 6.0)
-        )
-        emergency_penalty_mult = float(
-            getattr(config.agent, "ev_emergency_penalty_mult", 4.0)
-        )
-        conflict_penalty_mult = float(
-            getattr(config.agent, "ev_conflict_penalty_mult", 25.0)
-        )
-
-        conf_term = max(0.0, confidence - 0.5) * conf_mult
-        margin_term = max(0.0, margin) * margin_mult
-        source_term = max(0, source_count - 1) * source_mult
-        bearish_penalty = max(0, bearish_pressure) * bearish_penalty_mult
-        emergency_penalty = max(0, emergency_count) * emergency_penalty_mult
-        conflict_penalty = (
-            float(min(buy_count, sell_count)) / float(max(1, buy_count + sell_count))
-        ) * conflict_penalty_mult
-        return (
-            conf_term
-            + margin_term
-            + source_term
-            - bearish_penalty
-            - emergency_penalty
-            - conflict_penalty
-        )
-
     def _passes_ev_gate(
         self,
         *,
@@ -291,22 +277,17 @@ class AggregatorAgent:
         emergency_count: int,
         buy_count: int,
         sell_count: int,
-    ) -> bool:
-        """
-        EV gate for directional entries.
-        Uses bps cost floor + safety buffer. EXIT/WAIT are not blocked.
-        """
-        if action not in (Action.BUY, Action.SELL):
-            return True
-        enabled = bool(getattr(config.agent, "ev_gate_enabled", True))
-        if not enabled:
-            return True
-
-        fee_bps_per_side = float(getattr(config.agent, "ev_fee_bps_per_side", 2.0))
-        slippage_bps = float(getattr(config.agent, "ev_slippage_bps", 3.0))
-        buffer_bps = float(getattr(config.agent, "ev_buffer_bps", 8.0))
-        required_bps = 2.0 * fee_bps_per_side + slippage_bps + buffer_bps
-        edge_bps = self._expected_edge_bps(
+    ) -> tuple[bool, str]:
+        """EV + R:R gate (expected edge must cover costs + min profit bps)."""
+        agent = config.agent
+        cal_extra, cal_note = calibration_extra_bps(
+            self.edge_calibration,
+            action=action.value,
+            confidence=confidence,
+            enabled=bool(getattr(agent, "agg_edge_calibration_enabled", True)),
+        )
+        result = evaluate_edge_gate(
+            action=action.value,
             confidence=confidence,
             margin=margin,
             source_count=source_count,
@@ -314,8 +295,28 @@ class AggregatorAgent:
             emergency_count=emergency_count,
             buy_count=buy_count,
             sell_count=sell_count,
+            fee_bps_per_side=float(getattr(agent, "ev_fee_bps_per_side", 2.0)),
+            slippage_bps=float(getattr(agent, "ev_slippage_bps", 3.0)),
+            buffer_bps=float(getattr(agent, "ev_buffer_bps", 6.0)),
+            min_profit_bps=float(getattr(agent, "agg_rr_min_profit_bps", 15.0)),
+            ev_gate_enabled=bool(getattr(agent, "ev_gate_enabled", True)),
+            rr_gate_enabled=bool(getattr(agent, "agg_rr_gate_enabled", True)),
+            calibration_extra_bps=cal_extra,
+            confidence_mult=float(getattr(agent, "ev_confidence_mult", 16.0)),
+            margin_mult=float(getattr(agent, "ev_margin_mult", 20.0)),
+            source_mult=float(getattr(agent, "ev_source_mult", 3.0)),
+            bearish_penalty_mult=float(getattr(agent, "ev_bearish_penalty_mult", 6.0)),
+            emergency_penalty_mult=float(
+                getattr(agent, "ev_emergency_penalty_mult", 4.0)
+            ),
+            conflict_penalty_mult=float(
+                getattr(agent, "ev_conflict_penalty_mult", 25.0)
+            ),
         )
-        return edge_bps >= required_bps
+        reason = result.reason
+        if not result.passed and cal_note:
+            reason = f"{reason} {cal_note}".strip()
+        return result.passed, reason
 
     async def start(self):
         """Start background aggregation tasks."""
@@ -461,9 +462,10 @@ class AggregatorAgent:
             max_score = max(buy_score, sell_score, exit_score)
             sorted_scores = sorted([buy_score, sell_score, exit_score], reverse=True)
             score_margin = sorted_scores[0] - sorted_scores[1]
-            min_margin = 0.10
+            min_margin = float(getattr(config.agent, "agg_min_margin", 0.12))
+            min_score = float(getattr(config.agent, "agg_min_score", 0.35))
 
-            if max_score < 0.3:
+            if max_score < min_score:
                 return None
             if score_margin < min_margin:
                 action = Action.WAIT
@@ -494,7 +496,7 @@ class AggregatorAgent:
                 exit_signals,
                 reasons,
             )
-            if not self._passes_ev_gate(
+            ev_ok, ev_reason = self._passes_ev_gate(
                 action=action,
                 confidence=confidence,
                 margin=score_margin,
@@ -503,11 +505,64 @@ class AggregatorAgent:
                 emergency_count=emergency_count,
                 buy_count=len(buy_signals),
                 sell_count=len(sell_signals),
-            ):
+            )
+            if not ev_ok:
                 action = Action.WAIT
                 confidence = min(confidence, 0.45)
-                reasons = reasons + ["EV gate: expected edge below costs."]
-            
+                reasons = reasons + [ev_reason or "EV gate: expected edge below costs."]
+
+            btc_snap = {"trend": "unknown", "return_pct": None}
+            if bool(getattr(config.agent, "agg_btc_trend_filter_enabled", True)):
+                now_ts = int(datetime.utcnow().timestamp())
+                btc_snap = btc_trend_at_ts(
+                    self.db.db_path,
+                    now_ts,
+                    lookback_minutes=int(
+                        getattr(config.agent, "agg_btc_trend_lookback_minutes", 30)
+                    ),
+                    symbol=str(getattr(config.agent, "agg_btc_symbol", "BTCUSDT")),
+                    down_threshold_pct=float(
+                        getattr(config.agent, "agg_btc_trend_down_threshold_pct", -0.08)
+                    ),
+                    up_threshold_pct=float(
+                        getattr(config.agent, "agg_btc_trend_up_threshold_pct", 0.08)
+                    ),
+                )
+
+            ok, q_reason = passes_entry_quality(
+                action.value,
+                confidence,
+                buy_signals,
+                sell_signals,
+                min_unique_agents=int(
+                    getattr(config.agent, "agg_min_unique_agents", 2)
+                ),
+                min_directional_confidence=float(
+                    getattr(config.agent, "agg_directional_min_confidence", 0.58)
+                ),
+                require_quality_agent_for_buy=bool(
+                    getattr(config.agent, "agg_require_quality_agent_for_buy", True)
+                ),
+                exit_signals=exit_signals,
+                emergency_count=emergency_count,
+                bearish_pressure=bearish_pressure,
+                buy_score=buy_score,
+                sell_score=sell_score,
+                bearish_regime_enabled=bool(
+                    getattr(config.agent, "agg_bearish_regime_enabled", True)
+                ),
+                symbol=symbol,
+                btc_trend=str(btc_snap.get("trend") or "unknown"),
+                btc_trend_return_pct=btc_snap.get("return_pct"),
+                btc_trend_filter_enabled=bool(
+                    getattr(config.agent, "agg_btc_trend_filter_enabled", True)
+                ),
+            )
+            if not ok:
+                action = Action.WAIT
+                confidence = min(confidence, 0.42)
+                reasons = reasons + [q_reason]
+
             risk = self._calculate_risk(signals)
 
             price = None
@@ -598,7 +653,8 @@ class AggregatorAgent:
 
             type_weight = float(self.signal_weights.get(agent_type, {}).get(signal_type, 0.45))
             priority_weight = float(self.priority_weights.get(signal.priority, 0.5))
-            weight = max(0.05, type_weight * (0.5 + 0.5 * priority_weight))
+            agent_mult = float(self.agent_weight_mult.get(agent_type, 1.0))
+            weight = max(0.05, type_weight * (0.5 + 0.5 * priority_weight) * agent_mult)
             signal_conf = self._signal_confidence(signal)
 
             total_weight += weight

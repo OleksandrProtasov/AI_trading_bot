@@ -11,7 +11,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from core.backtest_portfolio import BacktestConfig, run_aggregator_backtest
+from core.backtest_portfolio import backtest_config_from_app, run_aggregator_backtest
+from core.btc_trend import BtcTrendCache
+from core.entry_quality import passes_entry_quality
+from core.edge_calibration import calibration_extra_bps, load_calibration
+from core.ev_edge import evaluate_edge_gate
 from core.runtime_paths import resolved_database_path
 
 
@@ -110,38 +114,6 @@ def _extract_reasons(items: List[RawSignal]) -> List[str]:
 
 def _hours_ago_ts(hours: int) -> int:
     return int((datetime.utcnow() - timedelta(hours=hours)).timestamp())
-
-
-def _expected_edge_bps(
-    *,
-    confidence: float,
-    margin: float,
-    source_count: int,
-    bearish_pressure: int,
-    emergency_count: int,
-    buy_count: int,
-    sell_count: int,
-    confidence_mult: float,
-    margin_mult: float,
-    source_mult: float,
-    bearish_penalty_mult: float,
-    emergency_penalty_mult: float,
-    conflict_penalty_mult: float,
-) -> float:
-    """
-    Heuristic expected edge proxy in bps:
-    - confidence above 0.5 indicates directional quality
-    - margin between top-2 scores indicates conviction separation
-    """
-    conf_term = max(0.0, confidence - 0.5) * confidence_mult
-    margin_term = max(0.0, margin) * margin_mult
-    source_term = max(0, source_count - 1) * source_mult
-    bearish_penalty = max(0, bearish_pressure) * bearish_penalty_mult
-    emergency_penalty = max(0, emergency_count) * emergency_penalty_mult
-    conflict_penalty = (
-        float(min(buy_count, sell_count)) / float(max(1, buy_count + sell_count))
-    ) * conflict_penalty_mult
-    return conf_term + margin_term + source_term - bearish_penalty - emergency_penalty - conflict_penalty
 
 
 def _copy_db(src: str, dst: str) -> None:
@@ -248,6 +220,21 @@ def main() -> None:
             last_sent_by_key: Dict[str, int] = {}
             inserted = 0
             ev_filtered = 0
+            rr_filtered = 0
+            btc_filtered = 0
+            btc_cache = BtcTrendCache()
+            rr_on = True
+            min_profit_bps_default = 15.0
+            cal_enabled = True
+            edge_calibration = load_calibration()
+            try:
+                from config import config as app_config
+
+                rr_on = bool(app_config.agent.agg_rr_gate_enabled)
+                min_profit_bps_default = float(app_config.agent.agg_rr_min_profit_bps)
+                cal_enabled = bool(app_config.agent.agg_edge_calibration_enabled)
+            except Exception:
+                pass
 
             for s in raw:
                 bucket = by_symbol[s.symbol]
@@ -298,7 +285,23 @@ def main() -> None:
 
                 if max_s < args.min_confidence:
                     continue
-                expected_bps = _expected_edge_bps(
+                rr_on = True
+                min_profit_bps = 15.0
+                try:
+                    from config import config as app_config
+
+                    rr_on = bool(app_config.agent.agg_rr_gate_enabled)
+                    min_profit_bps = float(app_config.agent.agg_rr_min_profit_bps)
+                except Exception:
+                    pass
+                cal_extra, _ = calibration_extra_bps(
+                    edge_calibration,
+                    action=action,
+                    confidence=max_s,
+                    enabled=cal_enabled,
+                )
+                edge_res = evaluate_edge_gate(
+                    action=action,
                     confidence=max_s,
                     margin=margin,
                     source_count=len(window),
@@ -306,16 +309,86 @@ def main() -> None:
                     emergency_count=emergency_count,
                     buy_count=len(buy),
                     sell_count=len(sell),
-                    confidence_mult=args.ev_confidence_mult,
-                    margin_mult=args.ev_margin_mult,
-                    source_mult=args.ev_source_mult,
-                    bearish_penalty_mult=args.ev_bearish_penalty_mult,
-                    emergency_penalty_mult=args.ev_emergency_penalty_mult,
-                    conflict_penalty_mult=args.ev_conflict_penalty_mult,
+                    fee_bps_per_side=float(args.fee_bps),
+                    slippage_bps=float(args.slippage_bps),
+                    buffer_bps=float(args.ev_buffer_bps),
+                    min_profit_bps=min_profit_bps,
+                    ev_gate_enabled=True,
+                    rr_gate_enabled=rr_on,
+                    calibration_extra_bps=cal_extra,
+                    confidence_mult=float(args.ev_confidence_mult),
+                    margin_mult=float(args.ev_margin_mult),
+                    source_mult=float(args.ev_source_mult),
+                    bearish_penalty_mult=float(args.ev_bearish_penalty_mult),
+                    emergency_penalty_mult=float(args.ev_emergency_penalty_mult),
+                    conflict_penalty_mult=float(args.ev_conflict_penalty_mult),
                 )
-                required_bps = 2.0 * float(args.fee_bps) + float(args.slippage_bps) + float(args.ev_buffer_bps)
-                if expected_bps < required_bps:
+                if not edge_res.passed:
                     ev_filtered += 1
+                    if edge_res.min_profit_bps > 0:
+                        rr_filtered += 1
+                    continue
+
+                try:
+                    from config import config as app_config
+
+                    min_unique = int(app_config.agent.agg_min_unique_agents)
+                    min_dir_conf = float(app_config.agent.agg_directional_min_confidence)
+                    require_quality = bool(
+                        app_config.agent.agg_require_quality_agent_for_buy
+                    )
+                except Exception:
+                    min_unique = 2
+                    min_dir_conf = 0.58
+                    require_quality = True
+
+                bearish_on = True
+                btc_on = True
+                lookback_min = 30
+                down_thr = -0.08
+                up_thr = 0.08
+                btc_sym = "BTCUSDT"
+                try:
+                    from config import config as app_config
+
+                    bearish_on = bool(app_config.agent.agg_bearish_regime_enabled)
+                    btc_on = bool(app_config.agent.agg_btc_trend_filter_enabled)
+                    lookback_min = int(app_config.agent.agg_btc_trend_lookback_minutes)
+                    down_thr = float(app_config.agent.agg_btc_trend_down_threshold_pct)
+                    up_thr = float(app_config.agent.agg_btc_trend_up_threshold_pct)
+                    btc_sym = str(app_config.agent.agg_btc_symbol)
+                except Exception:
+                    pass
+                btc_snap = btc_cache.get(
+                    replay_db,
+                    s.ts,
+                    lookback_minutes=lookback_min,
+                    symbol=btc_sym,
+                    down_threshold_pct=down_thr,
+                    up_threshold_pct=up_thr,
+                )
+                ok, _ = passes_entry_quality(
+                    action,
+                    max_s,
+                    buy,
+                    sell,
+                    min_unique_agents=min_unique,
+                    min_directional_confidence=min_dir_conf,
+                    require_quality_agent_for_buy=require_quality,
+                    exit_signals=exit_,
+                    emergency_count=emergency_count,
+                    bearish_pressure=bearish_pressure,
+                    buy_score=buy_s,
+                    sell_score=sell_s,
+                    bearish_regime_enabled=bearish_on,
+                    symbol=s.symbol,
+                    btc_trend=str(btc_snap.get("trend") or "unknown"),
+                    btc_trend_return_pct=btc_snap.get("return_pct"),
+                    btc_trend_filter_enabled=btc_on,
+                )
+                if not ok:
+                    if action == "BUY" and str(btc_snap.get("trend")) == "down":
+                        btc_filtered += 1
                     continue
 
                 key = f"{s.symbol}:{action}"
@@ -359,7 +432,7 @@ def main() -> None:
 
             conn.commit()
 
-            cfg = BacktestConfig(
+            cfg = backtest_config_from_app(
                 min_confidence=args.min_confidence,
                 horizon_minutes=args.horizon_minutes,
                 fee_bps_per_side=args.fee_bps,
@@ -379,16 +452,22 @@ def main() -> None:
                 "window_hours": args.hours,
                 "replayed_aggregator_signals": inserted,
                 "ev_filtered_signals": ev_filtered,
+                "btc_trend_filtered_signals": btc_filtered,
+                "rr_filtered_signals": rr_filtered,
                 "ev_gate": {
-                    "required_bps": 2.0 * float(args.fee_bps) + float(args.slippage_bps) + float(args.ev_buffer_bps),
+                    "required_bps": 2.0 * float(args.fee_bps)
+                    + float(args.slippage_bps)
+                    + float(args.ev_buffer_bps)
+                    + (min_profit_bps_default if rr_on else 0.0),
+                    "min_profit_bps": min_profit_bps_default if rr_on else 0.0,
                     "slippage_bps": float(args.slippage_bps),
                     "buffer_bps": float(args.ev_buffer_bps),
                     "confidence_mult": float(args.ev_confidence_mult),
                     "margin_mult": float(args.ev_margin_mult),
-                "source_mult": float(args.ev_source_mult),
-                "bearish_penalty_mult": float(args.ev_bearish_penalty_mult),
-                "emergency_penalty_mult": float(args.ev_emergency_penalty_mult),
-                "conflict_penalty_mult": float(args.ev_conflict_penalty_mult),
+                    "source_mult": float(args.ev_source_mult),
+                    "bearish_penalty_mult": float(args.ev_bearish_penalty_mult),
+                    "emergency_penalty_mult": float(args.ev_emergency_penalty_mult),
+                    "conflict_penalty_mult": float(args.ev_conflict_penalty_mult),
                 },
                 "backtest": res,
             }

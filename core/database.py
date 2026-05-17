@@ -254,6 +254,39 @@ class Database:
                 return []
             finally:
                 conn.close()
+
+    async def get_candles_range(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_ts: int,
+        end_ts: int,
+    ) -> List[Dict]:
+        """Candles in [start_ts, end_ts] ascending."""
+        async with self.lock:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            try:
+                for sym in (symbol, (symbol or "").upper(), (symbol or "").lower()):
+                    cursor.execute(
+                        """
+                        SELECT * FROM candles
+                        WHERE symbol = ? AND timeframe = ?
+                          AND timestamp >= ? AND timestamp <= ?
+                        ORDER BY timestamp ASC
+                        """,
+                        (sym, timeframe, int(start_ts), int(end_ts)),
+                    )
+                    rows = cursor.fetchall()
+                    if rows:
+                        return [dict(row) for row in rows]
+                return []
+            except Exception as e:
+                self.logger.error("get_candles_range failed: %s", e, exc_info=True)
+                return []
+            finally:
+                conn.close()
     
     async def mark_signal_sent(self, signal_id: int):
         """Mark signal.sent_to_telegram = 1."""

@@ -132,6 +132,46 @@ def _close_price(
     return None
 
 
+def backtest_config_from_app(**overrides: Any) -> BacktestConfig:
+    """Build BacktestConfig aligned with live `config.agent` defaults."""
+    try:
+        from config import config
+
+        agent = config.agent
+        cfg = BacktestConfig(
+            min_confidence=float(
+                getattr(agent, "agg_directional_min_confidence", 0.58)
+            ),
+            horizon_minutes=int(
+                float(getattr(agent, "outcome_horizon_hours", 0.5)) * 60
+            ),
+            fee_bps_per_side=float(getattr(agent, "ev_fee_bps_per_side", 2.0)),
+            strategy_mode=str(getattr(agent, "strategy_mode", "defensive")),
+            strategy_min_confidence=float(
+                getattr(agent, "strategy_min_confidence", 0.60)
+            ),
+            strategy_required_confirmations=int(
+                getattr(agent, "strategy_required_confirmations", 3)
+            ),
+            strategy_bearish_guard_enabled=bool(
+                getattr(agent, "strategy_bearish_guard_enabled", True)
+            ),
+            strategy_bearish_guard_threshold=int(
+                getattr(agent, "strategy_bearish_guard_threshold", 2)
+            ),
+        )
+    except Exception:
+        cfg = BacktestConfig(
+            strategy_mode="defensive",
+            strategy_min_confidence=0.60,
+            strategy_required_confirmations=3,
+        )
+    for key, value in overrides.items():
+        if hasattr(cfg, key):
+            setattr(cfg, key, value)
+    return cfg
+
+
 def _effective_end_ts(
     cfg: BacktestConfig,
     *,

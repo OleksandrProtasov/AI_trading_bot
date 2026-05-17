@@ -18,9 +18,11 @@ from core.database import Database
 from core.metrics import Metrics
 from core.health_check import HealthCheck
 from core.runtime_paths import resolved_database_path
+from core.research_artifacts import load_research_summary
 from core.backtest_portfolio import (
     BacktestConfig,
     DEFAULT_RAW_AGENT_TYPES,
+    backtest_config_from_app,
     run_aggregator_backtest,
     run_backtest_compare,
     run_raw_signals_backtest,
@@ -161,6 +163,15 @@ async def outcomes_summary(hours: int = Query(168, ge=1, le=8760)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/research/summary")
+async def research_summary(history_tail: int = Query(10, ge=1, le=100)):
+    """Latest daily research artifacts (WF history, promoted EV params)."""
+    try:
+        return load_research_summary(history_tail=history_tail)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # --- Metrics ---
 
 @app.get("/api/metrics")
@@ -184,7 +195,7 @@ async def backtest_aggregator(
     """Historical backtest over saved aggregator signals."""
     try:
         since_ts = int((datetime.utcnow() - timedelta(hours=hours)).timestamp())
-        cfg = BacktestConfig(
+        cfg = backtest_config_from_app(
             min_confidence=min_confidence,
             horizon_minutes=horizon_minutes,
             fee_bps_per_side=fee_bps,
