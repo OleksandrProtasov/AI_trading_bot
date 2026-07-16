@@ -10,6 +10,9 @@ from datetime import datetime
 from itertools import product
 from typing import Any, Dict, List, Tuple
 
+from core.research_end_ts import resolve_research_end_ts
+from core.runtime_paths import resolved_database_path
+
 
 def _run_window(
     *,
@@ -86,35 +89,38 @@ def _run_window(
 
 
 def _bootstrap_profiles(args: argparse.Namespace) -> List[Dict[str, Any]]:
-    """From stricter to looser replay generation settings."""
+    """From stricter to looser replay generation settings (live-aligned floors)."""
+    floor_conf = float(args.min_confidence)
+    floor_score = float(args.min_score)
+    floor_margin = float(args.min_margin)
     return [
         {
             "recent_window_sec": args.recent_window_sec,
-            "min_score": args.min_score,
-            "min_margin": args.min_margin,
+            "min_score": floor_score,
+            "min_margin": floor_margin,
             "dedup_sec": args.dedup_sec,
-            "min_confidence": args.min_confidence,
+            "min_confidence": floor_conf,
         },
         {
             "recent_window_sec": max(args.recent_window_sec, 180),
-            "min_score": min(args.min_score, 0.22),
-            "min_margin": min(args.min_margin, 0.06),
+            "min_score": max(floor_score * 0.9, floor_score - 0.05),
+            "min_margin": max(floor_margin * 0.85, floor_margin - 0.03),
             "dedup_sec": min(args.dedup_sec, 30),
-            "min_confidence": min(args.min_confidence, 0.38),
+            "min_confidence": floor_conf,
         },
         {
             "recent_window_sec": max(args.recent_window_sec, 240),
-            "min_score": min(args.min_score, 0.18),
-            "min_margin": min(args.min_margin, 0.03),
+            "min_score": max(floor_score * 0.8, floor_score - 0.08),
+            "min_margin": max(floor_margin * 0.7, floor_margin - 0.05),
             "dedup_sec": min(args.dedup_sec, 20),
-            "min_confidence": min(args.min_confidence, 0.35),
+            "min_confidence": floor_conf,
         },
         {
             "recent_window_sec": max(args.recent_window_sec, 300),
-            "min_score": min(args.min_score, 0.12),
-            "min_margin": min(args.min_margin, 0.01),
+            "min_score": max(floor_score * 0.7, floor_score - 0.12),
+            "min_margin": max(floor_margin * 0.5, floor_margin - 0.08),
             "dedup_sec": min(args.dedup_sec, 10),
-            "min_confidence": min(args.min_confidence, 0.30),
+            "min_confidence": floor_conf,
         },
     ]
 
@@ -357,11 +363,11 @@ def main() -> None:
     )
     p.add_argument("--end-ts", type=int, default=None)
     p.add_argument("--horizon-minutes", type=int, default=30)
-    p.add_argument("--recent-window-sec", type=int, default=60)
-    p.add_argument("--min-score", type=float, default=0.3)
-    p.add_argument("--min-margin", type=float, default=0.1)
-    p.add_argument("--dedup-sec", type=int, default=60)
-    p.add_argument("--min-confidence", type=float, default=0.4)
+    p.add_argument("--recent-window-sec", type=int, default=120)
+    p.add_argument("--min-score", type=float, default=0.35)
+    p.add_argument("--min-margin", type=float, default=0.12)
+    p.add_argument("--dedup-sec", type=int, default=40)
+    p.add_argument("--min-confidence", type=float, default=0.58)
     p.add_argument("--fee-bps", type=float, default=2.0)
     p.add_argument("--max-open", type=int, default=3)
     p.add_argument("--entry-gap-sec", type=int, default=120)
@@ -392,7 +398,11 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    base_end = args.end_ts if args.end_ts is not None else _now_ts()
+    base_end = resolve_research_end_ts(
+        resolved_database_path(),
+        horizon_minutes=int(args.horizon_minutes),
+        explicit=args.end_ts,
+    )
     step_candidates: List[int]
     if args.auto_step_hours.strip():
         step_candidates = [
@@ -457,6 +467,7 @@ def main() -> None:
         "checked": checked,
         "timed_out": timed_out,
         "elapsed_sec": round(time.time() - started_at, 2),
+        "research_end_ts": base_end,
         "window_hours": args.window_hours,
         "step_hours": selected_step,
         "auto_step_hours": step_candidates,

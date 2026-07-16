@@ -40,12 +40,17 @@ class OutcomeEvaluationService:
         self.logger.info(
             "Outcome evaluator running (interval=%ss)", self._interval_sec()
         )
+        agent = self.config.agent
         while self.running:
             try:
                 now_ts = timegm(datetime.utcnow().utctimetuple())
                 n = await self.db.evaluate_pending_aggregated_outcomes(
                     now_ts,
                     direction_threshold_pct=self._threshold_pct(),
+                    use_sl_tp_exits=bool(getattr(agent, "agg_use_sl_tp_exits", True)),
+                    fee_bps_per_side=float(getattr(agent, "ev_fee_bps_per_side", 2.0)),
+                    default_sl_pct=float(getattr(agent, "agg_sl_pct", 0.35)),
+                    default_tp_rr_ratio=float(getattr(agent, "agg_tp_rr_ratio", 3.0)),
                 )
                 if n:
                     self.logger.info("Evaluated %s aggregated outcome row(s)", n)

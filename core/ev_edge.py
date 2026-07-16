@@ -18,6 +18,7 @@ class EdgeGateResult:
 
 def expected_edge_bps(
     *,
+    action: str = "BUY",
     confidence: float,
     margin: float,
     source_count: int,
@@ -35,19 +36,19 @@ def expected_edge_bps(
     conf_term = max(0.0, confidence - 0.5) * confidence_mult
     margin_term = max(0.0, margin) * margin_mult
     source_term = max(0, source_count - 1) * source_mult
-    bearish_penalty = max(0, bearish_pressure) * bearish_penalty_mult
-    emergency_penalty = max(0, emergency_count) * emergency_penalty_mult
     conflict_penalty = (
         float(min(buy_count, sell_count)) / float(max(1, buy_count + sell_count))
     ) * conflict_penalty_mult
-    return (
-        conf_term
-        + margin_term
-        + source_term
-        - bearish_penalty
-        - emergency_penalty
-        - conflict_penalty
-    )
+
+    act = (action or "").upper()
+    if act == "SELL":
+        bearish_term = max(0, bearish_pressure) * (bearish_penalty_mult * 0.5)
+        emergency_term = max(0, emergency_count) * (emergency_penalty_mult * 0.25)
+    else:
+        bearish_term = -max(0, bearish_pressure) * bearish_penalty_mult
+        emergency_term = -max(0, emergency_count) * emergency_penalty_mult
+
+    return conf_term + margin_term + source_term + bearish_term + emergency_term - conflict_penalty
 
 
 def required_edge_bps(
@@ -98,6 +99,7 @@ def evaluate_edge_gate(
         return EdgeGateResult(True, 0.0, 0.0, 0.0, 0.0)
 
     edge = expected_edge_bps(
+        action=act,
         confidence=confidence,
         margin=margin,
         source_count=source_count,

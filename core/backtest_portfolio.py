@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core.utils import is_stable_coin
+from core.trade_levels import levels_from_data_or_compute, passes_min_rr, simulate_sl_tp_path
 
 
 @dataclass
@@ -37,6 +38,11 @@ class BacktestConfig:
     # Allow exceptional setups to bypass cool-off.
     cooloff_override_confidence: float = 0.9
     cooloff_override_confirmations: int = 3
+    # Asymmetric SL/TP exits (tight stop, wide take).
+    use_sl_tp_exits: bool = True
+    sl_pct: float = 0.35
+    tp_rr_ratio: float = 3.0
+    min_rr_ratio: float = 2.5
 
 
 DEFAULT_RAW_AGENT_TYPES: Tuple[str, ...] = (
@@ -132,6 +138,40 @@ def _close_price(
     return None
 
 
+def _candles_range(
+    cur: sqlite3.Cursor,
+    symbol: str,
+    start_ts: int,
+    end_ts: int,
+    timeframe: str = "1m",
+) -> List[Dict[str, Any]]:
+    for sym in (symbol, symbol.upper(), symbol.lower()):
+        cur.execute(
+            """
+            SELECT timestamp, open, high, low, close, volume
+            FROM candles
+            WHERE symbol = ? AND timeframe = ?
+              AND timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp ASC
+            """,
+            (sym, timeframe, start_ts, end_ts),
+        )
+        rows = cur.fetchall()
+        if rows:
+            return [
+                {
+                    "timestamp": int(r[0]),
+                    "open": float(r[1]),
+                    "high": float(r[2]),
+                    "low": float(r[3]),
+                    "close": float(r[4]),
+                    "volume": float(r[5]),
+                }
+                for r in rows
+            ]
+    return []
+
+
 def backtest_config_from_app(**overrides: Any) -> BacktestConfig:
     """Build BacktestConfig aligned with live `config.agent` defaults."""
     try:
@@ -159,6 +199,10 @@ def backtest_config_from_app(**overrides: Any) -> BacktestConfig:
             strategy_bearish_guard_threshold=int(
                 getattr(agent, "strategy_bearish_guard_threshold", 2)
             ),
+            use_sl_tp_exits=bool(getattr(agent, "agg_use_sl_tp_exits", True)),
+            sl_pct=float(getattr(agent, "agg_sl_pct", 0.35)),
+            tp_rr_ratio=float(getattr(agent, "agg_tp_rr_ratio", 3.0)),
+            min_rr_ratio=float(getattr(agent, "agg_min_rr_ratio", 2.5)),
         )
     except Exception:
         cfg = BacktestConfig(
@@ -365,21 +409,53 @@ def run_aggregator_backtest(
             if exit_ts > end_ts:
                 skipped["out_of_range_exit"] += 1
                 continue
-            exit_price = _close_price(cur, symbol, exit_ts)
-            if exit_price is None or exit_price <= 0:
-                skipped["missing_exit_price"] += 1
+
+            levels = levels_from_data_or_compute(
+                entry_price,
+                action,
+                data,
+                sl_pct=cfg.sl_pct,
+                tp_rr_ratio=cfg.tp_rr_ratio,
+            )
+            if not passes_min_rr(
+                levels.sl_pct, levels.tp_pct, min_rr=cfg.min_rr_ratio
+            ):
+                skipped["strategy_filtered"] += 1
                 continue
+
+            net_ret: Optional[float] = None
+            exit_price: Optional[float] = None
+            if cfg.use_sl_tp_exits:
+                candles = _candles_range(cur, symbol, ts, exit_ts)
+                if candles:
+                    sim = simulate_sl_tp_path(
+                        entry_price,
+                        action,
+                        candles,
+                        levels.sl,
+                        levels.tp,
+                        fee_bps_per_side=cfg.fee_bps_per_side,
+                    )
+                    if sim:
+                        net_ret = sim.net_return_pct / 100.0
+                        exit_price = sim.exit_price
+
+            if net_ret is None:
+                exit_price = _close_price(cur, symbol, exit_ts)
+                if exit_price is None or exit_price <= 0:
+                    skipped["missing_exit_price"] += 1
+                    continue
+                gross_ret = (exit_price - entry_price) / entry_price
+                if action == "SELL":
+                    gross_ret = -gross_ret
+                fee = 2.0 * (cfg.fee_bps_per_side / 10000.0)
+                net_ret = gross_ret - fee
 
             open_slots.append(exit_ts)
             last_entry_ts = ts
             last_by_symbol[symbol] = ts
             trades_by_symbol[symbol] = trades_by_symbol.get(symbol, 0) + 1
 
-            gross_ret = (exit_price - entry_price) / entry_price
-            if action == "SELL":
-                gross_ret = -gross_ret
-            fee = 2.0 * (cfg.fee_bps_per_side / 10000.0)
-            net_ret = gross_ret - fee
             equity *= 1.0 + net_ret
             peak = max(peak, equity)
             dd = (peak - equity) / peak if peak > 0 else 0.0
@@ -412,6 +488,10 @@ def run_aggregator_backtest(
                 cooloff_left = cfg.cooloff_skipped_entries
                 loss_streak = 0
         wins = sum(1 for t in trades if t["net_return_pct"] > 0)
+        trades_by_symbol: Dict[str, int] = {}
+        for t in trades:
+            sym = str(t.get("symbol") or "")
+            trades_by_symbol[sym] = trades_by_symbol.get(sym, 0) + 1
         return {
             "mode": "aggregator",
             "config": {
@@ -438,6 +518,7 @@ def run_aggregator_backtest(
             "total_return_pct": (equity - 1.0) * 100.0,
             "max_drawdown_pct": max_dd * 100.0,
             "monthly_return_pct": monthly,
+            "trades_by_symbol": trades_by_symbol,
             "last_trades": trades[-10:],
             "skipped": skipped,
         }

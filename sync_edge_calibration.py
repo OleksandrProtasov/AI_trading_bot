@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timedelta
 
 from core.edge_calibration import build_edge_calibration, save_calibration
+from core.research_end_ts import resolve_research_end_ts
 from core.runtime_paths import resolved_database_path
 
 
@@ -19,7 +20,9 @@ def main() -> None:
     p.add_argument("--max-extra-bps", type=float, default=30.0)
     args = p.parse_args()
 
-    since_ts = int((datetime.utcnow() - timedelta(hours=args.hours)).timestamp())
+    db_path = resolved_database_path()
+    end_ts = resolve_research_end_ts(db_path)
+    since_ts = int(end_ts) - int(args.hours) * 3600
     try:
         from config import config as app_config
 

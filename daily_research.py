@@ -166,6 +166,11 @@ def main() -> None:
         action="store_true",
         help="If set, allow promotion when score is equal to previous run",
     )
+    p.add_argument(
+        "--tail-wf",
+        action="store_true",
+        help="Short recent WF preset: 168h windows x4, step 48/24/12, min-trades=5",
+    )
     p.add_argument("--keep", type=int, default=30, help="How many latest runs to keep")
     p.add_argument("--end-ts", type=int, default=None)
     p.add_argument("--window-hours", type=int, default=720)
@@ -175,7 +180,7 @@ def main() -> None:
     p.add_argument("--min-score", type=float, default=0.35)
     p.add_argument("--min-margin", type=float, default=0.12)
     p.add_argument("--dedup-sec", type=int, default=40)
-    p.add_argument("--min-confidence", type=float, default=0.4)
+    p.add_argument("--min-confidence", type=float, default=0.58)
     p.add_argument("--min-trades-per-window", type=int, default=20)
     p.add_argument("--min-active-windows", type=int, default=3)
     p.add_argument("--max-runtime-sec", type=int, default=1800)
@@ -193,6 +198,14 @@ def main() -> None:
         help="Do not run sync_edge_calibration/sync_agent_weights after research",
     )
     args = p.parse_args()
+
+    if args.tail_wf:
+        args.window_hours = 168
+        args.windows = 4
+        args.auto_step_hours = "48,24,12"
+        args.min_trades_per_window = 5
+        args.min_active_windows = 2
+        args.max_runtime_sec = min(int(args.max_runtime_sec), 900)
 
     history_path = Path(args.history_path)
     history = load_history(history_path)

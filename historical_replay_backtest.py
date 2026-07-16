@@ -12,11 +12,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.backtest_portfolio import backtest_config_from_app, run_aggregator_backtest
+from core.analyst_portfolio import AnalystPortfolioConfig, run_analyst_portfolio_backtest
 from core.btc_trend import BtcTrendCache
 from core.entry_quality import passes_entry_quality
 from core.edge_calibration import calibration_extra_bps, load_calibration
 from core.ev_edge import evaluate_edge_gate
+from core.trade_levels import compute_trade_levels
+from core.research_end_ts import resolve_research_end_ts
 from core.runtime_paths import resolved_database_path
+from core.structure_gate import StructureGate
+from core.structure_levels import finalize_structure_levels
 
 
 @dataclass
@@ -117,10 +122,14 @@ def _hours_ago_ts(hours: int) -> int:
 
 
 def _copy_db(src: str, dst: str) -> None:
-    src_conn = sqlite3.connect(src)
-    dst_conn = sqlite3.connect(dst)
+    src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=120)
+    dst_conn = sqlite3.connect(dst, timeout=120)
     try:
+        src_conn.execute("PRAGMA query_only=ON")
         src_conn.backup(dst_conn)
+        dst_conn.execute("PRAGMA journal_mode=WAL")
+        dst_conn.execute("PRAGMA synchronous=NORMAL")
+        dst_conn.commit()
     finally:
         dst_conn.close()
         src_conn.close()
@@ -173,11 +182,11 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Historical replay for aggregator logic")
     p.add_argument("--hours", type=int, default=24 * 30)
     p.add_argument("--end-ts", type=int, default=None)
-    p.add_argument("--recent-window-sec", type=int, default=60)
-    p.add_argument("--min-confidence", type=float, default=0.4)
-    p.add_argument("--min-score", type=float, default=0.3)
-    p.add_argument("--min-margin", type=float, default=0.1)
-    p.add_argument("--dedup-sec", type=int, default=60)
+    p.add_argument("--recent-window-sec", type=int, default=120)
+    p.add_argument("--min-confidence", type=float, default=0.58)
+    p.add_argument("--min-score", type=float, default=0.35)
+    p.add_argument("--min-margin", type=float, default=0.12)
+    p.add_argument("--dedup-sec", type=int, default=40)
     p.add_argument("--horizon-minutes", type=int, default=30)
     p.add_argument("--fee-bps", type=float, default=2.0)
     p.add_argument("--max-open", type=int, default=3)
@@ -192,13 +201,67 @@ def main() -> None:
     p.add_argument("--ev-bearish-penalty-mult", type=float, default=6.0)
     p.add_argument("--ev-emergency-penalty-mult", type=float, default=4.0)
     p.add_argument("--ev-conflict-penalty-mult", type=float, default=25.0)
+    p.add_argument(
+        "--structure-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply SMC structure gate (matches live when enabled).",
+    )
+    p.add_argument(
+        "--analyst-mode",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Analyst scoring filter (live-like quality + win_prob).",
+    )
+    p.add_argument(
+        "--analyst-ready-min",
+        type=int,
+        default=72,
+    )
+    p.add_argument(
+        "--analyst-min-win",
+        type=float,
+        default=0.45,
+    )
+    p.add_argument(
+        "--analyst-continuation-ready-min",
+        type=int,
+        default=None,
+        help="Min quality for continuation entries (default: config or 76).",
+    )
+    p.add_argument(
+        "--analyst-continuation-min-win",
+        type=float,
+        default=None,
+        help="Min win prob for continuation (default: config or 0.48).",
+    )
+    p.add_argument(
+        "--continuation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable SMC continuation path (default: from config).",
+    )
+    p.add_argument("--deposit-eur", type=float, default=0.0)
+    p.add_argument("--leverage", type=float, default=10.0)
+    p.add_argument(
+        "--score-at-runtime",
+        action="store_true",
+        help="Score each replay trade at entry time (quality-sized portfolio).",
+    )
+    p.add_argument(
+        "--confidence-sizing",
+        action="store_true",
+        help="Size positions from aggregator confidence (historical baseline).",
+    )
     args = p.parse_args()
 
     db_path = resolved_database_path()
-    if args.end_ts is not None:
-        start_ts = int(args.end_ts) - int(args.hours * 3600)
-    else:
-        start_ts = _hours_ago_ts(args.hours)
+    end_ts = resolve_research_end_ts(
+        db_path,
+        horizon_minutes=int(args.horizon_minutes),
+        explicit=args.end_ts,
+    )
+    start_ts = int(end_ts) - int(args.hours * 3600)
 
     # Keep weights aligned with runtime aggregator defaults.
     weights = {
@@ -212,7 +275,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         replay_db = str(Path(tmp) / "replay.db")
         _copy_db(db_path, replay_db)
-        conn = sqlite3.connect(replay_db)
+        conn = sqlite3.connect(replay_db, timeout=120)
+        conn.execute("PRAGMA journal_mode=WAL")
         try:
             _clear_aggregator_signals(conn, start_ts=start_ts)
             raw = _load_raw(conn, start_ts=start_ts, end_ts=args.end_ts)
@@ -222,7 +286,47 @@ def main() -> None:
             ev_filtered = 0
             rr_filtered = 0
             btc_filtered = 0
+            structure_filtered = 0
+            analyst_filtered = 0
             btc_cache = BtcTrendCache()
+            try:
+                from config import config as app_config
+
+                cont_ready_min = int(
+                    args.analyst_continuation_ready_min
+                    if args.analyst_continuation_ready_min is not None
+                    else getattr(app_config.agent, "analyst_continuation_ready_min_score", 76)
+                )
+                cont_min_win = float(
+                    args.analyst_continuation_min_win
+                    if args.analyst_continuation_min_win is not None
+                    else getattr(
+                        app_config.agent, "analyst_continuation_min_win_probability", 0.48
+                    )
+                )
+                continuation_on = (
+                    bool(args.continuation)
+                    if args.continuation is not None
+                    else bool(
+                        getattr(app_config.agent, "agg_structure_continuation_enabled", True)
+                    )
+                )
+            except Exception:
+                cont_ready_min = int(args.analyst_continuation_ready_min or 76)
+                cont_min_win = float(args.analyst_continuation_min_win or 0.48)
+                continuation_on = (
+                    bool(args.continuation)
+                    if args.continuation is not None
+                    else True
+                )
+            if args.continuation is not None:
+                structure_gate = StructureGate(continuation_enabled=continuation_on)
+            else:
+                structure_gate = StructureGate()
+            struct_enabled = bool(args.structure_gate)
+            analyst_mode = bool(args.analyst_mode)
+            replay_retest = 0
+            replay_continuation = 0
             rr_on = True
             min_profit_bps_default = 15.0
             cal_enabled = True
@@ -285,6 +389,10 @@ def main() -> None:
 
                 if max_s < args.min_confidence:
                     continue
+
+                if analyst_mode and action not in ("BUY", "SELL"):
+                    continue
+
                 rr_on = True
                 min_profit_bps = 15.0
                 try:
@@ -337,10 +445,18 @@ def main() -> None:
                     require_quality = bool(
                         app_config.agent.agg_require_quality_agent_for_buy
                     )
+                    require_quality_sell = bool(
+                        getattr(
+                            app_config.agent,
+                            "agg_require_quality_agent_for_sell",
+                            True,
+                        )
+                    )
                 except Exception:
                     min_unique = 2
                     min_dir_conf = 0.58
                     require_quality = True
+                    require_quality_sell = True
 
                 bearish_on = True
                 btc_on = True
@@ -375,6 +491,7 @@ def main() -> None:
                     min_unique_agents=min_unique,
                     min_directional_confidence=min_dir_conf,
                     require_quality_agent_for_buy=require_quality,
+                    require_quality_agent_for_sell=require_quality_sell,
                     exit_signals=exit_,
                     emergency_count=emergency_count,
                     bearish_pressure=bearish_pressure,
@@ -391,12 +508,6 @@ def main() -> None:
                         btc_filtered += 1
                     continue
 
-                key = f"{s.symbol}:{action}"
-                last_ts = last_sent_by_key.get(key, 0)
-                if (s.ts - last_ts) < args.dedup_sec:
-                    continue
-                last_sent_by_key[key] = s.ts
-
                 price = None
                 for item in reversed(window):
                     try:
@@ -407,11 +518,154 @@ def main() -> None:
                     except (TypeError, ValueError):
                         continue
 
+                entry_px = price
+                sl = tp = None
+                setup_quality = 0
+                win_probability = 0.0
+                setup_phase = "none"
+                entry_mode = "none"
+                if entry_px and entry_px > 0 and action in ("BUY", "SELL"):
+                    if analyst_mode:
+                        sc = structure_gate.score_at(
+                            db_path=replay_db,
+                            symbol=s.symbol,
+                            action=action,
+                            entry_price=float(entry_px),
+                            as_of_ts=int(s.ts),
+                            aggregator_confidence=max_s,
+                        )
+                        setup = structure_gate.store.get(s.symbol)
+                        entry_mode = sc.entry_mode or "none"
+                        if sc.phase == "ready" and setup:
+                            if entry_mode == "continuation" and not continuation_on:
+                                analyst_filtered += 1
+                                continue
+                            if entry_mode != "continuation":
+                                from core.strategy_engine import propose_entry
+
+                                ent, in_zone, _ = propose_entry(
+                                    setup,
+                                    action,
+                                    float(entry_px),
+                                    entry_mode or "retest",
+                                )
+                                if not in_zone:
+                                    analyst_filtered += 1
+                                    continue
+                                entry_px = ent
+                        if sc.phase == "ready" and sc.sl and sc.tp and setup:
+                            from core.structure_levels import finalize_structure_levels
+
+                            min_sl = float(
+                                getattr(app_config.agent, "agg_structure_min_sl_pct", 0.55)
+                            )
+                            fl = finalize_structure_levels(
+                                setup,
+                                float(entry_px),
+                                action,
+                                min_rr=float(
+                                    getattr(app_config.agent, "agg_structure_min_rr", 3.0)
+                                ),
+                                min_sl_pct=min_sl,
+                            )
+                            if not fl:
+                                analyst_filtered += 1
+                                continue
+                            sc.sl = fl.sl
+                            sc.tp = fl.tp
+                            if fl.tp_pct < float(
+                                getattr(app_config.agent, "market_min_tp_room_pct", 1.0)
+                            ):
+                                analyst_filtered += 1
+                                continue
+                        setup_quality = sc.quality_score
+                        win_probability = sc.win_probability
+                        setup_phase = sc.phase
+                        ready_min = int(args.analyst_ready_min)
+                        min_win = float(args.analyst_min_win)
+                        score_min = (
+                            cont_ready_min if entry_mode == "continuation" else ready_min
+                        )
+                        win_min = cont_min_win if entry_mode == "continuation" else min_win
+                        if not (
+                            sc.phase == "ready"
+                            and sc.quality_score >= score_min
+                            and sc.win_probability >= win_min
+                        ):
+                            analyst_filtered += 1
+                            continue
+                        if entry_mode == "continuation":
+                            replay_continuation += 1
+                        elif entry_mode == "retest":
+                            replay_retest += 1
+                        if sc.sl and sc.tp:
+                            sl, tp = sc.sl, sc.tp
+                        else:
+                            try:
+                                levels = compute_trade_levels(
+                                    float(entry_px),
+                                    action,
+                                    sl_pct=0.35,
+                                    tp_rr_ratio=3.0,
+                                )
+                                sl, tp = levels.sl, levels.tp
+                            except Exception:
+                                pass
+                    elif struct_enabled:
+                        struct_res = structure_gate.evaluate_at(
+                            db_path=replay_db,
+                            symbol=s.symbol,
+                            action=action,
+                            entry_price=float(entry_px),
+                            as_of_ts=int(s.ts),
+                            enabled=True,
+                        )
+                        if not struct_res.allowed:
+                            structure_filtered += 1
+                            continue
+                        if struct_res.sl and struct_res.tp:
+                            sl, tp = struct_res.sl, struct_res.tp
+                        else:
+                            try:
+                                levels = compute_trade_levels(
+                                    float(entry_px),
+                                    action,
+                                    sl_pct=0.35,
+                                    tp_rr_ratio=3.0,
+                                )
+                                sl, tp = levels.sl, levels.tp
+                            except Exception:
+                                pass
+                    else:
+                        try:
+                            levels = compute_trade_levels(
+                                float(entry_px),
+                                action,
+                                sl_pct=0.35,
+                                tp_rr_ratio=3.0,
+                            )
+                            sl, tp = levels.sl, levels.tp
+                        except Exception:
+                            pass
+
+                key = f"{s.symbol}:{action}"
+                last_ts = last_sent_by_key.get(key, 0)
+                if (s.ts - last_ts) < args.dedup_sec:
+                    continue
+                last_sent_by_key[key] = s.ts
+
                 payload = {
                     "action": action,
                     "confidence": max_s,
                     "reasons": reasons,
                     "price": price,
+                    "entry": entry_px,
+                    "sl": sl,
+                    "tp": tp,
+                    "setup_quality": setup_quality,
+                    "setup_phase": setup_phase,
+                    "win_probability": win_probability,
+                    "entry_mode": entry_mode,
                     "source_signals_count": len(window),
                 }
                 conn.execute(
@@ -445,14 +699,24 @@ def main() -> None:
             res = run_aggregator_backtest(
                 replay_db,
                 start_ts=start_ts,
-                end_ts=args.end_ts,
+                end_ts=end_ts,
                 cfg=cfg,
             )
             out = {
                 "window_hours": args.hours,
+                "research_end_ts": end_ts,
                 "replayed_aggregator_signals": inserted,
                 "ev_filtered_signals": ev_filtered,
                 "btc_trend_filtered_signals": btc_filtered,
+                "structure_filtered_signals": structure_filtered,
+                "analyst_filtered_signals": analyst_filtered,
+                "analyst_mode": analyst_mode,
+                "continuation_enabled": continuation_on,
+                "replay_entry_modes": {
+                    "retest": replay_retest,
+                    "continuation": replay_continuation,
+                },
+                "structure_gate_enabled": struct_enabled,
                 "rr_filtered_signals": rr_filtered,
                 "ev_gate": {
                     "required_bps": 2.0 * float(args.fee_bps)
@@ -471,6 +735,30 @@ def main() -> None:
                 },
                 "backtest": res,
             }
+            if float(args.deposit_eur) > 0:
+                pf = AnalystPortfolioConfig(
+                    starting_eur=float(args.deposit_eur),
+                    leverage=float(args.leverage),
+                    ready_min_score=int(args.analyst_ready_min),
+                    min_win_probability=float(args.analyst_min_win),
+                    horizon_minutes=int(args.horizon_minutes),
+                    fee_bps_per_side=float(args.fee_bps),
+                    max_open_positions=int(args.max_open),
+                    score_at_runtime=bool(args.score_at_runtime),
+                    allow_forming=bool(args.score_at_runtime),
+                    forming_max_position_pct=0.02,
+                    use_confidence_sizing=bool(args.confidence_sizing),
+                )
+                if args.score_at_runtime:
+                    pf.ready_min_score = max(65, int(args.analyst_ready_min) - 4)
+                    pf.min_win_probability = max(0.40, float(args.analyst_min_win) - 0.03)
+                out["analyst_portfolio"] = run_analyst_portfolio_backtest(
+                    replay_db,
+                    start_ts=start_ts,
+                    end_ts=end_ts,
+                    portfolio=pf,
+                    bt_cfg=cfg,
+                )
             print(json.dumps(out, ensure_ascii=False, indent=2))
         finally:
             conn.close()

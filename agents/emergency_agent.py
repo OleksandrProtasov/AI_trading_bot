@@ -37,6 +37,7 @@ class EmergencyAgent:
                 await asyncio.sleep(config.agent.emergency_check_interval)
                 for symbol in self.market_agent.symbols:
                     await self._check_emergency_conditions(symbol)
+                self.event_router.ping_health("emergency")
             except Exception as e:
                 self.logger.error("Emergency monitor error: %s", e, exc_info=True)
                 await asyncio.sleep(1)

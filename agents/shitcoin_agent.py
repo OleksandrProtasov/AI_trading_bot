@@ -48,6 +48,7 @@ class ShitcoinAgent:
                                 )
                 
                 await asyncio.sleep(config.agent.shitcoin_scan_interval)
+                self.event_router.ping_health("shitcoin")
             except Exception as e:
                 self.logger.error("DEX scan error: %s", e, exc_info=True)
                 await asyncio.sleep(10)
