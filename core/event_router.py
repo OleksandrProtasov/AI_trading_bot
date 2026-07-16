@@ -3,9 +3,12 @@ import asyncio
 from datetime import datetime
 from enum import Enum
 import time
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 from core.database import Database
+
+if TYPE_CHECKING:
+    from core.health_check import HealthCheck
 from core.logger import get_logger
 
 
@@ -51,10 +54,12 @@ class EventRouter:
         aggregator_callback=None,
         *,
         forward_all_raw_to_telegram: bool = True,
+        health_check: Optional["HealthCheck"] = None,
     ):
         self.db = db
         self.telegram_handler = telegram_handler
         self.aggregator_callback = aggregator_callback
+        self.health_check = health_check
         self.forward_all_raw_to_telegram = forward_all_raw_to_telegram
         self.signal_queue = asyncio.Queue()
         self.running = False
@@ -71,6 +76,10 @@ class EventRouter:
             Priority.MEDIUM: 2,
             Priority.LOW: 1,
         }
+
+    def ping_health(self, agent_name: str):
+        if self.health_check:
+            self.health_check.update_activity(agent_name)
 
     async def add_signal(self, signal: Signal):
         """Enqueue a signal for persistence and downstream consumers."""
@@ -92,6 +101,9 @@ class EventRouter:
                     data=signal.data,
                 )
                 signal.id = signal_id
+
+                if self.health_check:
+                    self.health_check.update_signal(signal.agent_type)
 
                 if self.aggregator_callback:
                     try:

@@ -1,4 +1,4 @@
-"""BTC short-horizon trend for altcoin BUY gating."""
+"""BTC short-horizon trend for altcoin BUY/SELL gating."""
 from __future__ import annotations
 
 import sqlite3
@@ -39,6 +39,22 @@ def blocks_alt_buy(
     if not is_alt_symbol(symbol):
         return False
     return trend == "down"
+
+
+def blocks_alt_sell(
+    symbol: str,
+    action: str,
+    trend: str,
+    *,
+    enabled: bool = True,
+) -> bool:
+    if not enabled:
+        return False
+    if (action or "").upper() != "SELL":
+        return False
+    if not is_alt_symbol(symbol):
+        return False
+    return trend == "up"
 
 
 def btc_trend_block_reason(return_pct: float) -> str:

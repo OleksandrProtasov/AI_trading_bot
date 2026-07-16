@@ -12,6 +12,7 @@ from agents.emergency_agent import EmergencyAgent
 from agents.liquidity_agent import LiquidityAgent
 from agents.market_agent import MarketAgent
 from agents.onchain_agent import OnChainAgent
+from agents.open_interest_agent import OpenInterestAgent
 from agents.shitcoin_agent import ShitcoinAgent
 from bot.telegram_bot import TelegramBot
 from config import config
@@ -22,6 +23,7 @@ from core.health_check import HealthCheck
 from core.logger import setup_logger
 from core.metrics import Metrics
 from core.outcome_evaluator import OutcomeEvaluationService
+from core.paper_monitor import PaperTradeMonitor
 
 logger = setup_logger(
     __name__,
@@ -60,7 +62,11 @@ async def main():
                 config.telegram.bot_token, config.telegram.chat_id
             )
             await telegram_bot.send_daily_report(
-                "System is up and running."
+                "Analyst Mode включён.\n"
+                "• <b>ГОТОВЫЙ СЕТАП</b> — retest + фильтры рынка (стакан, OI, потенциал)\n"
+                "• <b>СЛЕДИ</b> — зона retest, пока не входить\n"
+                "• <b>Paper SL/TP</b> — бот пришлёт, когда сработает стоп или тейк\n"
+                "Paper-журнал ведётся локально для обучения."
             )
             logger.info("Telegram bot ready")
             if getattr(config.telegram, "forward_all_raw_signals", True):
@@ -89,6 +95,7 @@ async def main():
         None,
         aggregator_callback,
         forward_all_raw_to_telegram=False,
+        health_check=health_check,
     )
     aggregator_agent.event_router = event_router
 
@@ -96,26 +103,32 @@ async def main():
     market_agent = MarketAgent(db, event_router, config.default_symbols)
     onchain_agent = OnChainAgent(db, event_router, config.default_symbols)
     liquidity_agent = LiquidityAgent(db, event_router, market_agent)
+    aggregator_agent.liquidity_agent = liquidity_agent
+    aggregator_agent.market_agent = market_agent
     shitcoin_agent = ShitcoinAgent(db, event_router)
     emergency_agent = EmergencyAgent(
         db, event_router, market_agent, liquidity_agent
     )
+    oi_agent = OpenInterestAgent(db, event_router, config.default_symbols)
 
     logger.info("All agents initialized")
 
     health_check.register_agent("market", market_agent)
     health_check.register_agent("onchain", onchain_agent)
     health_check.register_agent("liquidity", liquidity_agent)
+    health_check.register_agent("open_interest", oi_agent)
     health_check.register_agent("shitcoin", shitcoin_agent)
     health_check.register_agent("emergency", emergency_agent)
     health_check.register_agent("aggregator", aggregator_agent)
 
     outcome_service = OutcomeEvaluationService(db, config)
+    paper_monitor = PaperTradeMonitor(db, config, telegram_bot)
 
     logger.info("Starting EventRouter...")
     router_task = asyncio.create_task(event_router.process_signals())
     health_task = asyncio.create_task(health_check.monitor())
     outcome_task = asyncio.create_task(outcome_service.run())
+    paper_task = asyncio.create_task(paper_monitor.run())
 
     logger.info("Starting agents...")
     logger.info("=" * 60)
@@ -173,11 +186,13 @@ async def main():
         market_agent.running = False
         onchain_agent.running = False
         liquidity_agent.running = False
+        oi_agent.running = False
         shitcoin_agent.running = False
         emergency_agent.running = False
         aggregator_agent.running = False
         event_router.running = False
         outcome_service.running = False
+        paper_monitor.running = False
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -187,12 +202,14 @@ async def main():
             market_agent.start(),
             onchain_agent.start(),
             liquidity_agent.start(),
+            oi_agent.start(),
             shitcoin_agent.start(),
             emergency_agent.start(),
             aggregator_agent.start(),
             router_task,
             health_task,
             outcome_task,
+            paper_task,
             activity_task,
             return_exceptions=True,
         )
@@ -212,11 +229,13 @@ async def main():
         market_agent.running = False
         onchain_agent.running = False
         liquidity_agent.running = False
+        oi_agent.running = False
         shitcoin_agent.running = False
         emergency_agent.running = False
         aggregator_agent.running = False
         event_router.running = False
         outcome_service.running = False
+        paper_monitor.running = False
 
         if hasattr(market_agent, "websocket") and market_agent.websocket:
             try:

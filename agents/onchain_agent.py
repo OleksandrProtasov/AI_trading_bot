@@ -58,6 +58,7 @@ class OnChainAgent:
                             self.logger.debug("Fetch error for %s: %s", symbol, e)
                 
                 await asyncio.sleep(config.agent.onchain_check_interval)
+                self.event_router.ping_health("onchain")
             except Exception as e:
                 self.logger.error("Whale monitor error: %s", e, exc_info=True)
                 await asyncio.sleep(10)

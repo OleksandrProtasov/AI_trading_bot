@@ -11,3 +11,6 @@ uvicorn[standard]>=0.24.0
 
 # Tests
 pytest>=8.0.0
+
+matplotlib>=3.8.0
+joblib>=1.3.0

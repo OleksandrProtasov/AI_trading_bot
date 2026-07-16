@@ -30,6 +30,17 @@ class MarketAgent:
         self.order_books = {}  # {symbol: orderbook}
         self.recent_trades = {}  # {symbol: [trades]}
         self.logger = get_logger(__name__)
+
+    def get_trade_flow_metrics(self, symbol: str, action: str = "BUY"):
+        """Taker buy/sell dominance from recent agg trades."""
+        from core.order_flow import analyze_trade_flow
+
+        sym = symbol.upper()
+        trades = self.recent_trades.get(sym) or self.recent_trades.get(symbol) or []
+        min_delta = float(getattr(config.agent, "flow_min_delta_pct", 0.08))
+        return analyze_trade_flow(
+            trades, action, min_trades=10, min_delta_pct=min_delta
+        )
         
     async def start(self):
         """Start concurrent WS and analysis loops."""
@@ -75,28 +86,40 @@ class MarketAgent:
             self.logger.error("Warmup failed: %s", e, exc_info=True)
     
     async def _listen_klines(self):
-        """Stream kline/candle updates."""
-        streams = [f"{symbol.lower()}@kline_1m" for symbol in self.symbols]
+        """Stream kline/candle updates (chunked for large universes)."""
+        chunk_size = int(getattr(config.binance, "kline_chunk_size", 40) or 40)
+        chunks = [
+            self.symbols[i : i + chunk_size]
+            for i in range(0, len(self.symbols), chunk_size)
+        ]
+        await asyncio.gather(
+            *[self._listen_klines_chunk(chunk) for chunk in chunks if chunk]
+        )
+
+    async def _listen_klines_chunk(self, symbols: List[str]):
+        streams = [f"{symbol.lower()}@kline_1m" for symbol in symbols]
         stream_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
-        
+
         while self.running:
             try:
                 async with websockets.connect(
                     stream_url,
                     ping_interval=config.binance.ping_interval,
-                    ping_timeout=config.binance.ping_timeout
+                    ping_timeout=config.binance.ping_timeout,
                 ) as ws:
                     self.logger.info(
-                        "Binance candle WS connected (%s symbols)", len(self.symbols)
+                        "Binance candle WS connected (%s symbols)", len(symbols)
                     )
                     async for message in ws:
                         if not self.running:
                             break
                         data = json.loads(message)
-                        if 'data' in data:
-                            await self._process_kline(data['data'])
+                        if "data" in data:
+                            await self._process_kline(data["data"])
             except Exception as e:
-                self.logger.error("Candle WebSocket error: %s", e, exc_info=True)
+                self.logger.error(
+                    "Candle WebSocket error (%s syms): %s", len(symbols), e, exc_info=True
+                )
                 await asyncio.sleep(config.binance.reconnect_delay)
     
     async def _process_kline(self, kline_data: Dict):
@@ -252,29 +275,45 @@ class MarketAgent:
             self.logger.error("Depth handling error: %s", e, exc_info=True)
     
     async def _listen_trades(self):
-        """Agg-trade stream."""
-        streams = [f"{symbol.lower()}@trade" for symbol in self.symbols]
+        """Agg-trade stream (chunked for large universes)."""
+        chunk_size = int(getattr(config.binance, "trade_chunk_size", 40) or 40)
+        chunks = [
+            self.symbols[i : i + chunk_size]
+            for i in range(0, len(self.symbols), chunk_size)
+        ]
+        await asyncio.gather(
+            *[self._listen_trades_chunk(chunk) for chunk in chunks if chunk]
+        )
+
+    async def _listen_trades_chunk(self, symbols: List[str]):
+        streams = [f"{symbol.lower()}@trade" for symbol in symbols]
         stream_url = f"wss://stream.binance.com:9443/stream?streams={'/'.join(streams)}"
-        
+
         while self.running:
             try:
                 async with websockets.connect(
                     stream_url,
                     ping_interval=config.binance.ping_interval,
-                    ping_timeout=config.binance.ping_timeout
+                    ping_timeout=config.binance.ping_timeout,
                 ) as ws:
-                    self.logger.info("Binance trades WS connected")
+                    self.logger.info(
+                        "Binance trades WS connected (%s symbols)", len(symbols)
+                    )
                     async for message in ws:
                         if not self.running:
                             break
                         data = json.loads(message)
-                        if 'data' in data:
-                            await self._process_trade(data['data'])
+                        if "data" in data:
+                            await self._process_trade(data["data"])
             except websockets.exceptions.ConnectionClosed as e:
-                self.logger.warning("Trades WS closed (%s), reconnecting...", e)
+                self.logger.warning(
+                    "Trades WS closed (%s syms, %s), reconnecting...", len(symbols), e
+                )
                 await asyncio.sleep(config.binance.reconnect_delay)
             except Exception as e:
-                self.logger.error("Trades WebSocket error: %s", e, exc_info=True)
+                self.logger.error(
+                    "Trades WebSocket error (%s syms): %s", len(symbols), e, exc_info=True
+                )
                 await asyncio.sleep(config.binance.reconnect_delay)
     
     async def _process_trade(self, trade_data: Dict):
@@ -419,6 +458,8 @@ class MarketAgent:
             except Exception as e:
                 self.logger.error("Market analysis error: %s", e, exc_info=True)
                 await asyncio.sleep(10)
+            else:
+                self.event_router.ping_health("market")
     
     async def stop(self):
         """Stop loops."""

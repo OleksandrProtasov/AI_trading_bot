@@ -45,3 +45,29 @@ def test_rr_gate_disabled_uses_cost_floor_only():
     )
     assert required == 13.0
     assert profit == 0.0
+
+
+def test_sell_gets_bearish_boost_not_penalty():
+    from core.ev_edge import expected_edge_bps
+
+    buy_edge = expected_edge_bps(
+        action="BUY",
+        confidence=0.6,
+        margin=0.1,
+        source_count=3,
+        bearish_pressure=3,
+        emergency_count=1,
+        buy_count=2,
+        sell_count=1,
+    )
+    sell_edge = expected_edge_bps(
+        action="SELL",
+        confidence=0.6,
+        margin=0.1,
+        source_count=3,
+        bearish_pressure=3,
+        emergency_count=1,
+        buy_count=2,
+        sell_count=1,
+    )
+    assert sell_edge > buy_edge
